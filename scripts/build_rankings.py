@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
-"""Build the X stock cashtag ranking from per-ticker X counts (stdlib only).
+"""X stock cashtag rankings: group-sweep screening + sampling + exact counts (stdlib only).
 
-Workflow for one refresh (see README.md):
+One run (details: README.md and the maintainer runbook):
 
-  python3 scripts/build_rankings.py universe        # optional, refresh ticker universe (weekly)
-  python3 scripts/build_rankings.py plan            # pick ~95 tickers + the UTC window -> work/plan.json
-  # for every ticker in work/plan.json call X counts/recent with query "$TICKER -is:retweet",
-  # granularity=hour, start_time/end_time = the plan window, and record meta.total_tweet_count:
-  python3 scripts/build_rankings.py record AAPL=110 MSFT=95 ... [--reads-left-today N]
-  python3 scripts/build_rankings.py status          # which planned tickers are still missing
-  python3 scripts/build_rankings.py build [--extra-reads N]
-  # -> data/latest.json, data/history/<UTC>.json, data/state.json, data/next_tickers.json
+  python3 scripts/build_rankings.py plan [--reads-left-today N]   # window, groups, budget -> work/run.json
+  python3 scripts/build_rankings.py calls groups                  # exact x tool arguments for the group counts
+  python3 scripts/build_rankings.py record S01=1471:364,344,... [--reads-left-today N]
+  python3 scripts/build_rankings.py pick-samples                  # stage 1: hottest groups to sample
+  python3 scripts/build_rankings.py calls samples
+  python3 scripts/build_rankings.py record-sample smp-S07 --json work/samples/smp-S07.json [--reads-left-today N]
+  python3 scripts/build_rankings.py pick-samples                  # stage 2: co-mention samples
+  ... record-sample ...
+  python3 scripts/build_rankings.py pick-candidates [--reads-left-today N]   # final individual list
+  python3 scripts/build_rankings.py calls counts
+  python3 scripts/build_rankings.py record NVDA=343:... MU=310:... [--reads-left-today N]
+  python3 scripts/build_rankings.py build
+  python3 scripts/build_rankings.py next        # at any time: what to do next + budget
+  python3 scripts/build_rankings.py check       # offline self-checks (packing coverage, config)
 
-Only tickers measured in THIS run (same window for all) are ranked. Nothing is
-carried over from earlier runs into the ranking.
+Every count read uses granularity=hour over the last 29 full UTC hours, so one read gives the
+5h window (last 5 buckets), the same 5 hours yesterday (first 5 buckets) and the hourly shape.
+Only tickers counted individually in THIS run are ranked; nothing is carried over.
 """
 import argparse
 import csv
 import io
 import json
+import math
 import os
 import re
+import statistics
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.environ.get("XCR_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
 WORK = os.path.join(ROOT, "work")
 CONFIG = os.path.join(ROOT, "config")
@@ -36,18 +45,42 @@ STATE_JSON = os.path.join(DATA, "state.json")
 NEXT_JSON = os.path.join(DATA, "next_tickers.json")
 LATEST_JSON = os.path.join(DATA, "latest.json")
 HISTORY_DIR = os.path.join(DATA, "history")
-PLAN_JSON = os.path.join(WORK, "plan.json")
-COUNTS_CSV = os.path.join(WORK, "counts.csv")
-RUNLOG_JSON = os.path.join(WORK, "run_log.json")
+RUN_JSON = os.path.join(WORK, "run.json")
 
 # --- method parameters -------------------------------------------------------
-WINDOW_HOURS = 5            # trailing window, aligned to full UTC hours
-RUN_SIZE = 95               # tickers measured per run (= X reads per run, +<=5 spare)
-HOT_MAX = 10                # max non-core "hot" re-measurements per run
-HOT_MIN_MENTIONS = 10       # a non-core ticker is "hot" if its last count was >= this
-HOT_MAX_AGE_HOURS = 48      # ... and that count is not older than this
-QUERY_PATTERN = "$TICKER -is:retweet"
+METHOD = "group-sweep+sampling+counts"
+METHOD_VERSION = 2
+WINDOW_HOURS = 5             # ranked window: last 5 full UTC hours
+HISTORY_HOURS = 29           # every count read covers 29 hourly buckets (window + same hours yesterday)
+MAX_QUERY_LEN = 4096         # X rejects longer queries (4099 chars -> invalid request, still costs a read)
+RUN_READS = 95               # target X reads per run (everything: groups, samples, counts, retries)
+DAILY_CAP = 600              # Alexander's cap per UTC day, shared by all bots
+DAILY_QUOTA = 1000           # the x tools report "B of 1000 today"; used today = 1000 - B
+FLOOR_LEFT = DAILY_QUOTA - DAILY_CAP   # never let "reads left today" drop below this (400)
+MIN_RUN_READS = 20           # skip the run if fewer reads fit
+ETF_GROUPS_PER_RUN = 2       # ETF groups rotate, 2 per run
+SAMPLE_GROUPS = 3            # stage-1 samples: the hottest groups
+COMENTION_SAMPLES = 3        # stage-2 samples: top new tickers from stage 1 / last risers
+SAMPLE_MAX_RESULTS = 25
+CANDIDATES = 20              # individual counts for discovered + carryover tickers
+CARRYOVER_MAX = 8            # of those, at most this many carried over from the last run
+CARRYOVER_MIN_MENTIONS = 25  # ... non-core tickers with >= this many mentions last run (or risers)
+CARRYOVER_MAX_AGE_HOURS = 12
+CORE_INDIVIDUAL = 50         # core tickers counted individually; the weakest rest go into the sweep
+CORE_FLOOR = 10              # budget shrink: core is cut first, down to this
+SPARE = 5                    # reserved for retries / invalid requests
+MIN_AUTHORS = 2              # a sampled ticker needs >= 2 distinct (non-spam) authors to be a candidate
+MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are list spam -> ignored for discovery
+TEMPLATE_MIN_AUTHORS = 3     # same normalized text from >= 3 authors -> template spam
+BURST_FACTOR = 6             # an hour > 6 x max(median of 29h, 3) is a burst
+BURST_MIN_MEDIAN = 3
+BURST_DECAY = 3              # ... and the following hour is < spike / 3 (it collapsed)
+RISER_MIN_MENTIONS = 20
+RISER_MIN_RATIO = 3.0        # momentum (smoothed ratio) needed to be a riser
+BASE_QUERY = "$TICKER -is:retweet"
 CASHTAG_RE = re.compile(r"^[A-Z]{1,6}$")
+TEXT_CASHTAG_RE = re.compile(r"(?<![A-Za-z0-9_$])\$([A-Za-z]{1,6})(?![A-Za-z0-9_])")
+RECORD_RE = re.compile(r"^([A-Za-z0-9.\-]+)=(?:(\d+):)?([\d,\s]+)$")
 
 FTD_REPO = "adanos-software/free-ticker-database"
 FTD_FILE = "data/core_listings.csv"
@@ -55,6 +88,7 @@ US_EXCHANGES = ("NASDAQ", "NYSE", "NYSE ARCA", "BATS", "NYSE MKT")
 ASSET_TYPES = ("Stock", "ETF")
 
 
+# --- helpers -----------------------------------------------------------------
 def utcnow():
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -83,20 +117,137 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
-def read_list(path):
+def config_lines(name):
+    """Non-empty config lines with '#' comments removed (case preserved)."""
+    path = os.path.join(CONFIG, name)
     out = []
     if not os.path.exists(path):
         return out
     with open(path, encoding="utf-8") as f:
         for line in f:
-            t = line.split("#", 1)[0].strip().upper()
-            if t and t not in out:
-                out.append(t)
+            # '#' starts a comment unless it is inside a quoted phrase
+            s, q = [], False
+            for ch in line:
+                if ch == '"':
+                    q = not q
+                if ch == "#" and not q:
+                    break
+                s.append(ch)
+            s = "".join(s).strip()
+            if s:
+                out.append(s)
     return out
 
 
-def query_for(ticker):
-    return QUERY_PATTERN.replace("TICKER", ticker)
+def read_list(name):
+    out = []
+    for s in config_lines(name):
+        t = s.split()[0].upper()
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def spam_terms():
+    return config_lines("spam_filter.txt")
+
+
+def collisions():
+    out = {}
+    for s in config_lines("collisions.txt"):
+        parts = s.split(None, 1)
+        out[parts[0].upper()] = parts[1].strip() if len(parts) > 1 else ""
+    return out
+
+
+def spam_accounts():
+    return {s.split()[0].lower().lstrip("@") for s in config_lines("spam_accounts.txt")}
+
+
+def suffix():
+    return " ".join(["-is:retweet"] + spam_terms())
+
+
+def group_query(tickers):
+    return "(" + " OR ".join("$" + t for t in tickers) + ") " + suffix()
+
+
+def ticker_query(t, coll=None):
+    coll = collisions() if coll is None else coll
+    if t in coll:
+        return " ".join(x for x in ["$" + t, suffix(), coll[t]] if x)
+    return BASE_QUERY.replace("TICKER", t)
+
+
+def sample_ticker_query(t, coll=None):
+    coll = collisions() if coll is None else coll
+    return " ".join(x for x in ["$" + t, suffix(), coll.get(t, "")] if x)
+
+
+def pack(tickers, maxlen=MAX_QUERY_LEN):
+    """Greedy packing of tickers (in order) into OR-groups whose full query is <= maxlen."""
+    sfx_len = len(suffix())
+    groups, cur, cur_len = [], [], 0
+    for t in tickers:
+        add = len(t) + 1 + (4 if cur else 0)          # "$T" (+ " OR ")
+        if cur and 2 + cur_len + add + 1 + sfx_len > maxlen:   # "(" ... ")" + " " + suffix
+            groups.append(cur)
+            cur, cur_len = [], 0
+            add = len(t) + 1
+        cur.append(t)
+        cur_len += add
+    if cur:
+        groups.append(cur)
+    for g in groups:
+        if len(group_query(g)) > maxlen:
+            raise SystemExit("packing error: group starting %s is %d chars" % (g[0], len(group_query(g))))
+    return groups
+
+
+def metrics(b):
+    """Window/momentum/burst metrics from 29 hourly buckets (oldest first)."""
+    n = len(b)
+    win = b[n - WINDOW_HOURS:]
+    m5 = sum(win)
+    y5 = sum(b[:WINDOW_HOURS]) if n >= HISTORY_HOURS else None
+    last = b[-1]
+    prev = b[n - 10:n - 1]
+    prev9 = sum(prev) / len(prev) if prev else 0.0
+    med = statistics.median(b) if b else 0
+    cap = BURST_FACTOR * max(med, BURST_MIN_MEDIAN)
+    # A burst is a spike hour (> cap) that already collapsed: the next hour is below
+    # spike / BURST_DECAY (typical bot/pump burst, e.g. $NET 374 posts in one hour, ~10/h
+    # around it). Only bursts inside the window are down-weighted (hour capped at cap).
+    # A spike in the LAST hour cannot be judged yet: it is labelled, not down-weighted,
+    # so a genuine breakout (e.g. a premarket gainer) is not penalised.
+    burst_idx, spike_last = [], False
+    for i in range(n - WINDOW_HOURS, n):
+        if b[i] > cap:
+            if i == n - 1:
+                spike_last = True
+            elif b[i + 1] * BURST_DECAY < b[i]:
+                burst_idx.append(i)
+    adjusted = sum(min(b[i], cap) if i in burst_idx else b[i] for i in range(n - WINDOW_HOURS, n))
+    return {
+        "mentions": m5,
+        "prev_day_same_hours": y5,
+        "momentum_5h": round((m5 + 1) / ((y5 or 0) + 1), 2) if y5 is not None else None,
+        "last_hour": last,
+        "prev_9h_avg": round(prev9, 1),
+        "momentum_1h": round((last + 1) / (prev9 + 1), 2),
+        "median_29h": med,
+        "burst_cap": cap,
+        "burst_idx": burst_idx,
+        "spike_last_hour": spike_last,
+        "adjusted": int(round(adjusted)),
+    }
+
+
+def heat(m):
+    """Unusual activity of a group: hourly excess over its own baseline (both views)."""
+    e1 = max(0.0, m["last_hour"] - m["prev_9h_avg"])
+    e5 = max(0.0, (m["mentions"] - (m["prev_day_same_hours"] or 0)) / WINDOW_HOURS)
+    return round(e1 + e5, 1)
 
 
 # --- universe ----------------------------------------------------------------
@@ -111,14 +262,14 @@ def cmd_universe(args):
             headers={"Accept": "application/vnd.github+json", "User-Agent": "x-cashtag-rankings"})
         with urllib.request.urlopen(req, timeout=60) as r:
             commit = json.load(r).get("sha")
-    except Exception as e:  # metadata only; fall back to the gh CLI if installed
+    except Exception as e:
         try:
             import subprocess
             commit = subprocess.run(["gh", "api", "repos/%s/commits/main" % FTD_REPO, "--jq", ".sha"],
                                     capture_output=True, text=True, timeout=60, check=True).stdout.strip() or None
         except Exception:
             print("warning: could not read source commit: %s" % e, file=sys.stderr)
-    exclude = set(read_list(os.path.join(CONFIG, "exclude_tickers.txt")))
+    exclude = set(read_list("exclude_tickers.txt"))
     seen, rows = set(), []
     for row in csv.DictReader(io.StringIO(text)):
         t = (row.get("ticker") or "").strip().upper()
@@ -133,20 +284,14 @@ def cmd_universe(args):
         w = csv.writer(f)
         w.writerow(["ticker", "name", "exchange", "asset_type"])
         w.writerows(rows)
-    meta = {
-        "source_repo": FTD_REPO,
-        "source_file": FTD_FILE,
-        "source_commit": commit,
+    write_json(UNIVERSE_META, {
+        "source_repo": FTD_REPO, "source_file": FTD_FILE, "source_commit": commit,
         "fetched_at": iso(utcnow()),
-        "filters": {
-            "exchange": list(US_EXCHANGES),
-            "asset_type": list(ASSET_TYPES),
-            "ticker_regex": CASHTAG_RE.pattern,
-            "excluded": "config/exclude_tickers.txt (crypto-coin cashtag collisions)",
-        },
+        "filters": {"exchange": list(US_EXCHANGES), "asset_type": list(ASSET_TYPES),
+                    "ticker_regex": CASHTAG_RE.pattern,
+                    "excluded": "config/exclude_tickers.txt (crypto-coin cashtag collisions)"},
         "count": len(rows),
-    }
-    write_json(UNIVERSE_META, meta)
+    })
     print("universe: %d tickers written to %s" % (len(rows), os.path.relpath(UNIVERSE_CSV, ROOT)))
 
 
@@ -157,42 +302,26 @@ def load_universe():
         return {r["ticker"]: r for r in csv.DictReader(f)}
 
 
-# --- selection ---------------------------------------------------------------
-def select_tickers(now):
-    """Return [(ticker, tier)] for one run: core + hot + rotation (RUN_SIZE total)."""
-    universe = load_universe()
-    exclude = set(read_list(os.path.join(CONFIG, "exclude_tickers.txt")))
-    state = load_json(STATE_JSON, {"tickers": {}})["tickers"]
-    # core tickers are always measured, even if the database lacks them (e.g. SHOP)
-    core = [t for t in read_list(os.path.join(CONFIG, "core_tickers.txt"))
-            if t not in exclude and CASHTAG_RE.match(t)]
-    chosen = [(t, "core") for t in core]
-    taken = set(core)
+def load_state():
+    """data/state.json; method-v1 files (tickers only) are migrated in memory."""
+    s = load_json(STATE_JSON, {}) or {}
+    s.setdefault("tickers", {})
+    s.setdefault("etf_rotation_next", 0)
+    s.setdefault("risers", [])
+    s.setdefault("last_run_noncore", [])
+    return s
 
-    cutoff = now - timedelta(hours=HOT_MAX_AGE_HOURS)
-    hot = []
-    for t, s in state.items():
-        if t in taken or t in exclude or t not in universe:
-            continue
-        if s.get("mentions", 0) >= HOT_MIN_MENTIONS and parse_iso(s["window_end"]) >= cutoff:
-            hot.append((-s["mentions"], t))
-    for _, t in sorted(hot)[:HOT_MAX]:
-        chosen.append((t, "hot"))
-        taken.add(t)
 
-    # rotation: least recently measured first ("" = never measured); ties broken by
-    # config/rotation_priority.txt order, then stocks before ETFs, then alphabetically
-    prio = {t: i for i, t in enumerate(read_list(os.path.join(CONFIG, "rotation_priority.txt")))}
-    need = max(0, RUN_SIZE - len(chosen))
-    pool = []
-    for t, row in universe.items():
-        if t in taken or t in exclude:
-            continue
-        last = state.get(t, {}).get("measured_at", "")
-        pool.append((last, prio.get(t, len(prio)), 0 if row["asset_type"] == "Stock" else 1, t))
-    for *_, t in sorted(pool)[:need]:
-        chosen.append((t, "rotation"))
-    return chosen
+def core_list():
+    exclude = set(read_list("exclude_tickers.txt"))
+    return [t for t in read_list("core_tickers.txt") if t not in exclude and CASHTAG_RE.match(t)]
+
+
+def core_priority(state):
+    """Core tickers, strongest last measurement first (unmeasured keep config order)."""
+    core = core_list()
+    st = state["tickers"]
+    return sorted(core, key=lambda t: (-(st.get(t, {}).get("mentions", -1)), core.index(t)))
 
 
 def window_for(now):
@@ -200,137 +329,655 @@ def window_for(now):
     return end - timedelta(hours=WINDOW_HOURS), end
 
 
-# --- commands ----------------------------------------------------------------
+def size_run(budget, n_stock_groups, n_etf_groups_avail):
+    """Split a read budget into steps. Shrink order: core (to CORE_FLOOR), ETF groups,
+    spare (to 1), samples (to 2), candidates (to 3), then core further."""
+    t = {"stock_groups": n_stock_groups, "etf_groups": min(ETF_GROUPS_PER_RUN, n_etf_groups_avail),
+         "samples": SAMPLE_GROUPS + COMENTION_SAMPLES, "candidates": CANDIDATES,
+         "core": CORE_INDIVIDUAL, "spare": SPARE}
+    over = lambda: sum(t.values()) - budget
+    for key, floor in (("core", CORE_FLOOR), ("etf_groups", 0), ("spare", 1), ("samples", 2),
+                       ("candidates", 3), ("core", 0), ("samples", 0), ("candidates", 0), ("spare", 0)):
+        if over() > 0:
+            t[key] = max(floor, t[key] - over())
+    return t, over() <= 0
+
+
+# --- run file ----------------------------------------------------------------
+def load_run():
+    run = load_json(RUN_JSON)
+    if not run or run.get("method_version") != METHOD_VERSION:
+        sys.exit("work/run.json missing or from the old method; run: python3 scripts/build_rankings.py plan")
+    return run
+
+
+def save_run(run):
+    write_json(RUN_JSON, run)
+
+
+def note_reads_left(run, n):
+    if n is not None:
+        prev = run["log"].get("reads_left_today")
+        run["log"]["reads_left_today"] = n if prev is None else min(prev, n)
+        run["log"]["reads_left_history"].append([iso(utcnow()), n])
+
+
+def reads_used(run):
+    return len(run["counts"]) + len(run["samples"]) + int(run["log"].get("extra_reads", 0))
+
+
+def reads_remaining(run):
+    rem = run["budget"] - reads_used(run)
+    left = run["log"].get("reads_left_today")
+    if left is not None:
+        rem = min(rem, left - FLOOR_LEFT)
+    return max(0, rem)
+
+
+# --- plan --------------------------------------------------------------------
 def cmd_plan(args):
     now = parse_iso(args.now) if args.now else utcnow()
     start, end = window_for(now)
-    tickers = select_tickers(now)
+    hist_start = end - timedelta(hours=HISTORY_HOURS)
+    universe = load_universe()
+    state = load_state()
+    exclude = set(read_list("exclude_tickers.txt"))
+    budget = RUN_READS
+    if args.reads_left_today is not None:
+        budget = min(RUN_READS, args.reads_left_today - FLOOR_LEFT)
+        if budget < MIN_RUN_READS:
+            print("SKIP: only %d reads fit under the daily cap (reads left %d, floor %d); do not run."
+                  % (budget, args.reads_left_today, FLOOR_LEFT))
+            sys.exit(3)
+    core = core_priority(state)
+    core_set = set(core)
+    etf_tickers = sorted(t for t, r in universe.items()
+                         if r["asset_type"] == "ETF" and t not in core_set and t not in exclude)
+    etf_groups = pack(etf_tickers)
+    stock_nc = [t for t, r in universe.items()
+                if r["asset_type"] == "Stock" and t not in core_set and t not in exclude]
+    # size with the default core split first, then re-pack with the actual demoted core
+    for _ in range(3):
+        guess, _ok = size_run(budget, len(pack(sorted(stock_nc + core[CORE_INDIVIDUAL:]))), len(etf_groups))
+        demoted = core[min(len(core), max(guess["core"], 0)):]
+        stock_groups = pack(sorted(set(stock_nc) | set(demoted)))
+        targets, ok = size_run(budget, len(stock_groups), len(etf_groups))
+        if targets["core"] == guess["core"]:
+            break
+    if not ok:
+        print("SKIP: the stock sweep alone (%d reads) does not fit the budget of %d." % (len(stock_groups), budget))
+        sys.exit(3)
+    n = len(etf_groups)
+    first = state["etf_rotation_next"] % n if n else 0
+    etf_pick = [(first + i) % n for i in range(targets["etf_groups"])] if n else []
+    groups = []
+    for i, g in enumerate(stock_groups):
+        groups.append({"key": "S%02d" % (i + 1), "kind": "stock", "tickers": g,
+                       "demoted_core": [t for t in g if t in core_set]})
+    for i in etf_pick:
+        groups.append({"key": "E%02d" % (i + 1), "kind": "etf", "tickers": etf_groups[i], "demoted_core": []})
+    for g in groups:
+        g["first"], g["last"], g["size"] = g["tickers"][0], g["tickers"][-1], len(g["tickers"])
+        g["query"] = group_query(g["tickers"])
+        g["query_len"] = len(g["query"])
     os.makedirs(WORK, exist_ok=True)
-    if os.path.exists(COUNTS_CSV):  # archive leftovers from an unfinished run
-        os.replace(COUNTS_CSV, COUNTS_CSV + ".prev-" + now.strftime("%Y%m%dT%H%M%SZ"))
-    plan = {
+    if os.path.exists(RUN_JSON):
+        os.replace(RUN_JSON, RUN_JSON + ".prev-" + now.strftime("%Y%m%dT%H%M%SZ"))
+    run = {
+        "method_version": METHOD_VERSION,
         "planned_at": iso(now),
         "window_start": iso(start),
         "window_end": iso(end),
-        "granularity": "hour",
-        "query_pattern": QUERY_PATTERN,
-        "tickers": [{"ticker": t, "tier": tier, "query": query_for(t)} for t, tier in tickers],
+        "history_start": iso(hist_start),
+        "budget": budget,
+        "targets": targets,
+        "core_order": core,
+        "core_individual_planned": core[:targets["core"]],
+        "etf_groups_total": n,
+        "etf_tickers_total": len(etf_tickers),
+        "etf_rotation_first": first,
+        "stock_tickers_swept": sum(len(g) for g in stock_groups),
+        "groups": groups,
+        "counts": {},
+        "samples": {},
+        "picks": {"samples1": None, "samples2": None, "individual": None},
+        "log": {"reads_left_today": args.reads_left_today, "reads_left_history": [], "extra_reads": 0},
     }
-    write_json(PLAN_JSON, plan)
-    write_json(RUNLOG_JSON, {"reads_left_today": None, "extra_reads": 0})
-    tiers = {}
-    for _, tier in tickers:
-        tiers[tier] = tiers.get(tier, 0) + 1
-    print("window %s -> %s (UTC), %d tickers %s" % (plan["window_start"], plan["window_end"], len(tickers), tiers))
-    print("tool: x get_posts_counts_recent  args: query=<query> granularity=hour start_time=%s end_time=%s"
-          % (plan["window_start"], plan["window_end"]))
-    print(" ".join(t for t, _ in tickers))
+    if args.reads_left_today is not None:
+        run["log"]["reads_left_history"].append([iso(now), args.reads_left_today])
+    save_run(run)
+    print("window %s -> %s UTC (29h buckets from %s); budget %d reads" % (run["window_start"], run["window_end"],
+                                                                          run["history_start"], budget))
+    print("targets:", json.dumps(targets), "total", sum(targets.values()))
+    print("groups: %d stock (%d tickers incl. %d demoted core) + ETF %s of %d"
+          % (len(stock_groups), run["stock_tickers_swept"], len(demoted),
+             ",".join(g["key"] for g in groups if g["kind"] == "etf") or "-", n))
+    print("next: python3 scripts/build_rankings.py calls groups")
 
 
-def load_plan():
-    plan = load_json(PLAN_JSON)
-    if not plan:
-        sys.exit("work/plan.json missing; run plan first")
-    return plan
+# --- calls (exact tool arguments) ---------------------------------------------
+def count_args(run, query):
+    return {"query": query, "granularity": "hour", "start_time": run["history_start"], "end_time": run["window_end"]}
 
 
-def load_counts():
-    out = {}
-    if os.path.exists(COUNTS_CSV):
-        with open(COUNTS_CSV, encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                out[r["ticker"]] = r  # last write wins (corrections)
+def sample_args(run, query):
+    return {"query": query, "sort_order": "relevancy", "max_results": SAMPLE_MAX_RESULTS,
+            "start_time": run["window_start"], "end_time": run["window_end"],
+            "post.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"}
+
+
+def pending_calls(run, stage):
+    out = []
+    if stage == "groups":
+        for g in run["groups"]:
+            if g["key"] not in run["counts"]:
+                out.append((g["key"], "get_posts_counts_recent", count_args(run, g["query"])))
+    elif stage == "samples":
+        for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or []):
+            if p["key"] not in run["samples"]:
+                out.append((p["key"], "search_posts_all", sample_args(run, p["query"])))
+    elif stage == "counts":
+        for p in run["picks"]["individual"] or []:
+            if p["ticker"] not in run["counts"]:
+                out.append((p["ticker"], "get_posts_counts_recent", count_args(run, p["query"])))
     return out
 
 
+def cmd_calls(args):
+    run = load_run()
+    calls = pending_calls(run, args.stage)
+    if args.key:
+        calls = [c for c in calls if c[0] in args.key]
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            for k, tool, a in calls:
+                f.write(json.dumps({"key": k, "namespace": "x", "tool": tool, "arguments": a}) + "\n")
+        print("%d pending %s calls written to %s" % (len(calls), args.stage, args.out))
+        return
+    for k, tool, a in calls:
+        print("## %s  -> namespace x, tool %s" % (k, tool))
+        print(json.dumps(a, ensure_ascii=False))
+    print("# %d pending %s calls; remaining run budget %d reads" % (len(calls), args.stage, reads_remaining(run)))
+
+
+# --- record counts -----------------------------------------------------------
+def parse_record(item):
+    m = RECORD_RE.match(item.strip())
+    if not m:
+        raise ValueError("bad record %r; expected KEY=TOTAL:b1,b2,...,b29" % item)
+    key, total, vals = m.group(1), m.group(2), m.group(3)
+    buckets = [int(x) for x in re.split(r"[,\s]+", vals.strip()) if x != ""]
+    if len(buckets) != HISTORY_HOURS:
+        raise ValueError("%s: %d buckets, expected %d (oldest first)" % (key, len(buckets), HISTORY_HOURS))
+    if total is not None and int(total) != sum(buckets):
+        raise ValueError("%s: buckets sum to %d but meta.total_tweet_count is %s (transcription error?)"
+                         % (key, sum(buckets), total))
+    return key, buckets
+
+
 def cmd_record(args):
-    plan = load_plan()
-    planned = {p["ticker"] for p in plan["tickers"]}
-    new = not os.path.exists(COUNTS_CSV)
-    now = iso(utcnow())
-    rows = []
+    run = load_run()
+    known = {g["key"] for g in run["groups"]}
+    known |= {p["ticker"] for p in (run["picks"]["individual"] or [])}
+    errors = 0
     for item in args.pairs:
-        if "=" not in item:
-            sys.exit("bad pair %r, expected TICKER=COUNT" % item)
-        t, c = item.split("=", 1)
-        t = t.strip().lstrip("$").upper()
-        if t not in planned:
-            sys.exit("%s is not in work/plan.json" % t)
-        rows.append((t, int(c), now))
-    with open(COUNTS_CSV, "a", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["ticker", "mentions", "measured_at"])
-        w.writerows(rows)
-    log = load_json(RUNLOG_JSON, {"reads_left_today": None, "extra_reads": 0})
-    if args.reads_left_today is not None:
-        log["reads_left_today"] = args.reads_left_today
-    if args.extra_reads:
-        log["extra_reads"] = log.get("extra_reads", 0) + args.extra_reads
-    write_json(RUNLOG_JSON, log)
-    done = load_counts()
-    print("recorded %d; %d/%d planned tickers measured" % (len(rows), len(done), len(planned)))
+        try:
+            key, buckets = parse_record(item)
+        except ValueError as e:
+            print("ERROR:", e)
+            errors += 1
+            continue
+        key = key.upper()
+        if key not in known:
+            print("ERROR: %s is not a planned group or picked ticker (run pick-candidates first?)" % key)
+            errors += 1
+            continue
+        run["counts"][key] = {"buckets": buckets, "recorded_at": iso(utcnow())}
+    run["log"]["extra_reads"] += args.extra_reads
+    note_reads_left(run, args.reads_left_today)
+    save_run(run)
+    print("recorded %d, errors %d; run reads used %d, remaining %d; reads left today %s"
+          % (len(args.pairs) - errors, errors, reads_used(run), reads_remaining(run), run["log"]["reads_left_today"]))
+    left = run["log"]["reads_left_today"]
+    if left is not None and reads_used(run) <= 2 and left - FLOOR_LEFT < MIN_RUN_READS:
+        print("SKIP RUN: only %d reads fit under the daily cap; stop now, do not build or commit." % (left - FLOOR_LEFT))
+    elif left is not None and left <= FLOOR_LEFT:
+        print("STOP: reads left today at/below %d; build with what you have." % FLOOR_LEFT)
+    elif reads_remaining(run) == 0 and any(pending_calls(run, st) for st in ("groups", "samples", "counts")):
+        print("STOP: run budget exhausted; build with what you have (unmeasured go to planned_not_measured).")
+    if errors:
+        sys.exit(1)
 
 
-def cmd_status(args):
-    plan = load_plan()
-    done = load_counts()
-    missing = [p["ticker"] for p in plan["tickers"] if p["ticker"] not in done]
-    print("window %s -> %s; measured %d/%d" % (plan["window_start"], plan["window_end"],
-                                                len(done), len(plan["tickers"])))
-    print("missing:", " ".join(missing) if missing else "(none)")
+# --- samples -----------------------------------------------------------------
+def group_metrics(run):
+    out = []
+    for g in run["groups"]:
+        c = run["counts"].get(g["key"])
+        if not c:
+            continue
+        m = metrics(c["buckets"])
+        m["heat"] = heat(m)
+        out.append((g, m))
+    return out
+
+
+def norm_text(text):
+    t = re.sub(r"https?://\S+", " ", text.lower())
+    t = TEXT_CASHTAG_RE.sub(" ", t)
+    t = re.sub(r"[@#]\w+", " ", t)
+    t = re.sub(r"[\d\W_]+", " ", t).strip()
+    return t[:60]
+
+
+def analyze_samples(run, keys=None):
+    """Aggregate kept sample posts -> {ticker: {authors:set, posts:int, via:set}} + per-sample stats."""
+    universe = load_universe()
+    exclude = set(read_list("exclude_tickers.txt"))
+    bad_accounts = spam_accounts()
+    terms = [t[1:].strip('"').lower() for t in spam_terms() if t.startswith("-")]
+    posts = []
+    for key, s in run["samples"].items():
+        if keys is not None and key not in keys:
+            continue
+        for p in s.get("posts", []):
+            posts.append((key, p))
+    # template detection across all samples of the run
+    tmpl = {}
+    for key, p in posts:
+        k = norm_text(p["text"])
+        if len(k) >= 20:
+            tmpl.setdefault(k, set()).add(p["author"].lower())
+    templates = {k for k, a in tmpl.items() if len(a) >= TEMPLATE_MIN_AUTHORS}
+    agg, stats = {}, {}
+    for key, p in posts:
+        st = stats.setdefault(key, {"posts": 0, "kept": 0, "spam_account": 0, "template": 0,
+                                    "list_spam": 0, "spam_term": 0})
+        st["posts"] += 1
+        author = p["author"].lower()
+        text = p["text"]
+        tags = []
+        for t in TEXT_CASHTAG_RE.findall(text):
+            t = t.upper()
+            if t not in tags:
+                tags.append(t)
+        if author in bad_accounts:
+            st["spam_account"] += 1
+            continue
+        if norm_text(text) in templates:
+            st["template"] += 1
+            continue
+        if len(tags) > MAX_CASHTAGS_PER_POST:
+            st["list_spam"] += 1
+            continue
+        low = text.lower()
+        if any(term and term in low for term in terms):
+            st["spam_term"] += 1
+            continue
+        st["kept"] += 1
+        for t in tags:
+            if t in exclude or t not in universe:
+                continue
+            a = agg.setdefault(t, {"authors": set(), "posts": 0, "via": set()})
+            a["authors"].add(author)
+            a["posts"] += 1
+            a["via"].add(key)
+    return agg, stats
+
+
+def cmd_pick_samples(args):
+    run = load_run()
+    picks = run["picks"]
+    missing = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
+    if missing and not args.force:
+        sys.exit("group counts missing for %s (record them, or use --force to continue without)" % ",".join(missing))
+    rem = reads_remaining(run)
+    if picks["samples1"] is None:
+        gm = sorted(group_metrics(run), key=lambda x: (-x[1]["heat"], x[0]["kind"] != "stock",
+                                                        -x[1]["mentions"], x[0]["key"]))
+        n = min(SAMPLE_GROUPS, run["targets"]["samples"], rem)
+        picks["samples1"] = [{"key": "smp-" + g["key"], "kind": "group", "target": g["key"], "query": g["query"],
+                              "heat": m["heat"]} for g, m in gm[:n]]
+        save_run(run)
+        print("stage 1: sample %s" % ", ".join("%s (heat %.1f)" % (p["target"], p["heat"]) for p in picks["samples1"]))
+        print("group heat ranking:", ", ".join("%s %.1f" % (g["key"], m["heat"]) for g, m in gm))
+        print("next: python3 scripts/build_rankings.py calls samples")
+        return
+    pend1 = [p["key"] for p in picks["samples1"] if p["key"] not in run["samples"]]
+    if pend1 and not args.force:
+        sys.exit("stage-1 samples not recorded yet: %s" % ", ".join(pend1))
+    if picks["samples2"] is None:
+        n = min(COMENTION_SAMPLES, max(0, run["targets"]["samples"] - len(picks["samples1"])), rem)
+        agg, _ = analyze_samples(run)
+        core_ind = set(run["core_individual_planned"])
+        ranked = sorted(((t, a) for t, a in agg.items() if t not in core_ind),
+                        key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
+        chosen = [t for t, a in ranked if len(a["authors"]) >= MIN_AUTHORS][:n]
+        for r in load_state()["risers"]:
+            if len(chosen) >= n:
+                break
+            if r["ticker"] not in chosen and r["ticker"] not in core_ind:
+                chosen.append(r["ticker"])
+        coll = collisions()
+        picks["samples2"] = [{"key": "smp-c-" + t, "kind": "comention", "target": t,
+                              "query": sample_ticker_query(t, coll)} for t in chosen]
+        save_run(run)
+        print("stage 2 (co-mentions): %s" % (", ".join(chosen) or "none"))
+        print("next: python3 scripts/build_rankings.py calls samples   (or pick-candidates if none pending)")
+        return
+    print("samples already picked; next: record pending samples, then pick-candidates")
+
+
+def parse_sample_json(obj):
+    users = {u.get("id"): u.get("username") for u in (obj.get("includes") or {}).get("users", [])}
+    posts = []
+    for d in obj.get("data") or []:
+        aid = d.get("author_id")
+        posts.append({"author": users.get(aid) or (aid or "unknown"), "text": d.get("text", ""),
+                      "created_at": d.get("created_at")})
+    return posts
+
+
+def cmd_record_sample(args):
+    run = load_run()
+    planned = {p["key"]: p for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or [])}
+    if args.key not in planned:
+        sys.exit("%s is not a picked sample (%s)" % (args.key, ", ".join(planned) or "none picked"))
+    if args.failed:
+        posts = None
+    elif args.json:
+        with open(args.json, encoding="utf-8") as f:
+            raw = f.read()
+        posts = parse_sample_json(json.loads(raw[raw.index("{"):raw.rindex("}") + 1]))
+    elif args.lines:
+        posts = []
+        with open(args.lines, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                sep = "\t" if "\t" in line else (" | " if " | " in line else None)
+                if line.strip() and sep:
+                    a, t = line.split(sep, 1)
+                    posts.append({"author": a.strip().lstrip("@"), "text": t})
+    else:
+        sys.exit("give --json FILE, --lines FILE or --failed")
+    run["samples"][args.key] = {"posts": posts or [], "failed": posts is None, "recorded_at": iso(utcnow())}
+    note_reads_left(run, args.reads_left_today)
+    save_run(run)
+    print("%s: %s posts; run reads used %d, remaining %d" % (args.key, "failed" if posts is None else len(posts),
+                                                              reads_used(run), reads_remaining(run)))
+
+
+# --- candidates --------------------------------------------------------------
+def cmd_pick_candidates(args):
+    run = load_run()
+    note_reads_left(run, args.reads_left_today)
+    state = load_state()
+    universe = load_universe()
+    coll = collisions()
+    pend = [k for k, *_ in pending_calls(run, "samples")]
+    if pend and not args.force:
+        sys.exit("samples not recorded yet: %s (or --force)" % ", ".join(pend))
+    rem = reads_remaining(run)
+    spare = min(SPARE, max(1, rem // 15)) if rem > 0 else 0
+    slots = max(0, rem - spare)
+    core = run["core_order"]
+    core_ind = run["core_individual_planned"]
+    # carryover: last run's strong non-core tickers and risers
+    end = parse_iso(run["window_end"])
+    carry = []
+    for r in state.get("last_run_noncore", []):
+        t = r["ticker"]
+        if t in core or t not in universe:
+            continue
+        if parse_iso(r["window_end"]) < end - timedelta(hours=CARRYOVER_MAX_AGE_HOURS):
+            continue
+        if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS:
+            carry.append((-(1 if r.get("riser") else 0), -r["mentions"], t))
+    carry = [t for *_, t in sorted(carry)][:CARRYOVER_MAX]
+    agg, _ = analyze_samples(run)
+    disc = sorted(((t, a) for t, a in agg.items()
+                   if t not in core_ind and t not in carry and len(a["authors"]) >= MIN_AUTHORS),
+                  key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
+    pool = [(t, "carryover", None) for t in carry] + \
+           [(t, "core" if t in core else "discovered", sorted(a["via"])) for t, a in disc]
+    # demoted core in the hottest groups come back first among the remaining core
+    hot_groups = {p["target"] for p in (run["picks"]["samples1"] or [])}
+    demoted = [t for t in core if t not in core_ind]
+    in_hot = {t for g in run["groups"] if g["key"] in hot_groups for t in g["demoted_core"]}
+    core_rest = sorted(demoted, key=lambda t: (t not in in_hot, core.index(t)))
+    cand_n = min(CANDIDATES, len(pool))
+    core_n = slots - cand_n
+    if core_n < CORE_FLOOR:
+        core_n = min(CORE_FLOOR, slots)
+        cand_n = max(0, min(len(pool), slots - core_n))
+    core_full = core_ind + core_rest
+    core_n = min(core_n, len(core_full))
+    chosen_core = core_full[:core_n]
+    picks, seen = [], set()
+    for t in chosen_core:
+        picks.append({"ticker": t, "tier": "core", "source": "core" if t in core_ind else "core-returned",
+                      "via": None})
+        seen.add(t)
+    for t, tier, via in pool:
+        if len([p for p in picks if p["tier"] != "core" or p["source"] == "discovered"]) >= cand_n:
+            break
+        if t in seen:
+            continue
+        picks.append({"ticker": t, "tier": "core" if tier == "core" else tier,
+                      "source": "discovered" if tier in ("discovered", "core") else tier, "via": via})
+        seen.add(t)
+    # call order = priority if the budget runs out mid-way: top core, then candidates, then the rest of core
+    head = [p for p in picks if p["tier"] == "core" and p["source"] != "discovered"]
+    rest = [p for p in picks if not (p["tier"] == "core" and p["source"] != "discovered")]
+    picks = head[:20] + rest + head[20:]
+    for p in picks:
+        p["collision"] = p["ticker"] in coll
+        p["query"] = ticker_query(p["ticker"], coll)
+    run["picks"]["individual"] = picks
+    run["spare_reserved"] = spare
+    save_run(run)
+    by = {}
+    for p in picks:
+        by[p["source"]] = by.get(p["source"], 0) + 1
+    print("individual counts: %d %s (remaining budget %d, spare %d)" % (len(picks), json.dumps(by), rem, spare))
+    print("discovered:", ", ".join("%s(%d)" % (t, len(a["authors"])) for t, a in disc[:30]) or "-")
+    print("next: python3 scripts/build_rankings.py calls counts")
+
+
+# --- next / status -----------------------------------------------------------
+def cmd_next(args):
+    run = load_run()
+    left = run["log"].get("reads_left_today")
+    print("window %s -> %s UTC; run reads used %d of budget %d, remaining %d; reads left today %s (floor %d)"
+          % (run["window_start"], run["window_end"], reads_used(run), run["budget"], reads_remaining(run),
+             left, FLOOR_LEFT))
+    g = pending_calls(run, "groups")
+    if g:
+        print("NEXT: group counts pending (%d): %s  -> calls groups / record" % (len(g), " ".join(k for k, *_ in g)))
+        return
+    if run["picks"]["samples1"] is None:
+        print("NEXT: pick-samples (stage 1)")
+        return
+    s = pending_calls(run, "samples")
+    if s:
+        print("NEXT: samples pending: %s  -> calls samples / record-sample" % " ".join(k for k, *_ in s))
+        return
+    if run["picks"]["samples2"] is None:
+        print("NEXT: pick-samples (stage 2)")
+        return
+    if run["picks"]["individual"] is None:
+        print("NEXT: pick-candidates")
+        return
+    c = pending_calls(run, "counts")
+    if c:
+        print("NEXT: individual counts pending (%d): %s  -> calls counts / record"
+              % (len(c), " ".join(k for k, *_ in c)))
+        return
+    print("NEXT: build")
+
+
+# --- build -------------------------------------------------------------------
+def hour_iso(run, idx):
+    return iso(parse_iso(run["history_start"]) + timedelta(hours=idx))
 
 
 def cmd_build(args):
-    plan = load_plan()
-    counts = load_counts()
-    if not counts:
-        sys.exit("no counts recorded in work/counts.csv")
-    tier_of = {p["ticker"]: p["tier"] for p in plan["tickers"]}
+    run = load_run()
+    run["log"]["extra_reads"] += args.extra_reads
+    picks = run["picks"]["individual"] or []
+    measured = [p for p in picks if p["ticker"] in run["counts"]]
+    if not measured:
+        sys.exit("no individual counts recorded")
     universe = load_universe()
     umeta = load_json(UNIVERSE_META, {})
-    log = load_json(RUNLOG_JSON, {"reads_left_today": None, "extra_reads": 0})
+    state = load_state()
     now = utcnow()
+    agg, sstats = analyze_samples(run)
 
-    measured = sorted(counts.values(), key=lambda r: (-int(r["mentions"]), r["ticker"]))
-    rankings = [{
-        "rank": i + 1,
-        "ticker": r["ticker"],
-        "cashtag": "$" + r["ticker"],
-        "mentions": int(r["mentions"]),
-        "tier": tier_of.get(r["ticker"], "extra"),
-    } for i, r in enumerate(measured)]
-    tiers = {}
-    for r in rankings:
-        tiers[r["tier"]] = tiers.get(r["tier"], 0) + 1
-    times = sorted(r["measured_at"] for r in measured)
-    reads_used = len(measured) + int(log.get("extra_reads", 0)) + int(args.extra_reads or 0)
-    not_measured = [p["ticker"] for p in plan["tickers"] if p["ticker"] not in counts]
+    entries = []
+    for p in measured:
+        t = p["ticker"]
+        c = run["counts"][t]
+        m = metrics(c["buckets"])
+        labels = []
+        if p["collision"]:
+            labels.append("collision-filtered")
+        if m["burst_idx"]:
+            labels.append("burst")
+        if m["spike_last_hour"]:
+            labels.append("spike-last-hour")
+        e = {
+            "ticker": t,
+            "cashtag": "$" + t,
+            "mentions": m["mentions"],
+            "tier": p["tier"],
+            "source": p["source"],
+            "labels": labels,
+            "mentions_prev_day_same_hours": m["prev_day_same_hours"],
+            "momentum_5h_vs_prev_day": m["momentum_5h"],
+            "mentions_last_hour": m["last_hour"],
+            "prev_9h_avg_per_hour": m["prev_9h_avg"],
+            "momentum_last_hour_vs_prev_9h": m["momentum_1h"],
+            "burst": bool(m["burst_idx"]),
+            "burst_hours": [hour_iso(run, i) for i in m["burst_idx"]],
+            "rank_score": m["adjusted"],
+            "hourly": c["buckets"][-WINDOW_HOURS:],
+        }
+        if p["collision"]:
+            e["query"] = p["query"]
+        if p.get("via"):
+            e["discovered_via"] = p["via"]
+        if t in agg:
+            e["sample_authors"] = len(agg[t]["authors"])
+        entries.append(e)
+    # risers
+    for e in entries:
+        ratio = max(e["momentum_5h_vs_prev_day"] or 0, e["momentum_last_hour_vs_prev_9h"] or 0)
+        if e["rank_score"] >= RISER_MIN_MENTIONS and ratio >= RISER_MIN_RATIO:
+            e["labels"].append("riser")
+            e["_riser_score"] = round(e["rank_score"] * math.log2(ratio), 1)
+    entries.sort(key=lambda e: (-e["rank_score"], -e["mentions"], e["ticker"]))
+    for i, e in enumerate(entries):
+        e["rank"] = i + 1
+    order = ["rank", "ticker", "cashtag", "mentions", "tier"]
+    rankings = [{**{k: e[k] for k in order}, **{k: v for k, v in e.items() if k not in order and not k.startswith("_")}}
+                for e in entries]
+    risers = sorted((e for e in entries if "_riser_score" in e), key=lambda e: (-e["_riser_score"], e["ticker"]))
+    risers_out = [{"ticker": e["ticker"], "cashtag": e["cashtag"], "mentions": e["mentions"], "rank": e["rank"],
+                   "tier": e["tier"], "source": e["source"],
+                   "mentions_prev_day_same_hours": e["mentions_prev_day_same_hours"],
+                   "momentum_5h_vs_prev_day": e["momentum_5h_vs_prev_day"],
+                   "mentions_last_hour": e["mentions_last_hour"],
+                   "momentum_last_hour_vs_prev_9h": e["momentum_last_hour_vs_prev_9h"],
+                   "burst": e["burst"], "riser_score": e["_riser_score"]} for e in risers]
 
+    gsum = []
+    for g, m in group_metrics(run):
+        gsum.append({"key": g["key"], "kind": g["kind"], "first": g["first"], "last": g["last"],
+                     "size": g["size"], "mentions": m["mentions"],
+                     "mentions_prev_day_same_hours": m["prev_day_same_hours"],
+                     "mentions_last_hour": m["last_hour"], "prev_9h_avg_per_hour": m["prev_9h_avg"],
+                     "momentum_5h_vs_prev_day": m["momentum_5h"], "momentum_last_hour_vs_prev_9h": m["momentum_1h"],
+                     "heat": m["heat"], "burst": bool(m["burst_idx"]),
+                     "sampled": any(p["target"] == g["key"] for p in (run["picks"]["samples1"] or []))})
+    missing_groups = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
+    stock_groups = [g for g in run["groups"] if g["kind"] == "stock"]
+    etf_groups = [g for g in run["groups"] if g["kind"] == "etf"]
+    tiers, sources = {}, {}
+    for e in entries:
+        tiers[e["tier"]] = tiers.get(e["tier"], 0) + 1
+        sources[e["source"]] = sources.get(e["source"], 0) + 1
+    times = sorted(c["recorded_at"] for c in run["counts"].values())
+    n_groups = sum(1 for g in run["groups"] if g["key"] in run["counts"])
+    n_ind = len(measured)
+    n_smp = len(run["samples"])
+    extra = int(run["log"].get("extra_reads", 0))
+    not_measured = [p["ticker"] for p in picks if p["ticker"] not in run["counts"]]
+    not_measured += [t for t in run["core_order"] if t not in {p["ticker"] for p in picks}
+                     and not any(t in g["tickers"] for g in stock_groups)]
+    coll_terms = suffix()
     out = {
         "generated_at": iso(now),
         "window_hours": WINDOW_HOURS,
-        "window_start": plan["window_start"],
-        "window_end": plan["window_end"],
+        "window_start": run["window_start"],
+        "window_end": run["window_end"],
         "universe": "stocks",
-        "method": "core+hot+rotation",
+        "method": METHOD,
         "source": {
             "platform": "X",
             "endpoint": "GET /2/tweets/counts/recent",
-            "query_pattern": plan["query_pattern"],
-            "granularity": plan["granularity"],
-            "metric": "meta.total_tweet_count over the window",
+            "query_pattern": BASE_QUERY,
+            "collision_query_pattern": "$TICKER " + coll_terms + " <per-ticker terms from config/collisions.txt>",
+            "granularity": "hour",
+            "history_hours": HISTORY_HOURS,
+            "metric": "sum of the last 5 hourly buckets (= meta.total_tweet_count over the window)",
         },
         "watchlist_size": len(universe),
-        "scan_count": len(measured),
+        "scan_count": n_ind,
         "ranked_count": len(rankings),
-        "tickers_measured": len(measured),
+        "tickers_measured": n_ind,
+        "screened_count": sum(len(g["tickers"]) for g in run["groups"] if g["key"] in run["counts"]),
         "tiers": tiers,
+        "sources": sources,
         "measured_from": times[0],
         "measured_until": times[-1],
         "planned_not_measured": not_measured,
-        "x_reads_used": reads_used,
-        "x_reads_left_today": log.get("reads_left_today"),
+        "x_reads_used": n_groups + n_smp + n_ind + extra,
+        "x_reads_breakdown": {"group_counts": n_groups, "samples": n_smp, "individual_counts": n_ind,
+                              "extra_errors_retries": extra},
+        "x_reads_left_today": run["log"].get("reads_left_today"),
+        "ranking_rule": ("rank_score = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
+                         "median, %d) whose next hour fell below a third of it) is capped at that limit; "
+                         "only differs from mentions for burst-flagged entries; ties by mentions"
+                         % (BURST_FACTOR, BURST_MIN_MEDIAN)),
+        "group_sweep": {
+            "query_pattern": "($T1 OR $T2 OR ...) " + coll_terms,
+            "max_query_chars": MAX_QUERY_LEN,
+            "stock_groups": len(stock_groups),
+            "stock_tickers_screened": sum(g["size"] for g in stock_groups),
+            "demoted_core_in_sweep": [t for g in stock_groups for t in g["demoted_core"]],
+            "etf_groups_this_run": [g["key"] for g in etf_groups],
+            "etf_groups_total": run["etf_groups_total"],
+            "etf_tickers_total": run["etf_tickers_total"],
+            "etf_tickers_screened": sum(g["size"] for g in etf_groups),
+            "groups_missing": missing_groups,
+            "note": ("A group count is an exact count of posts mentioning ANY ticker of the group (a post with "
+                     "several of them counts once), with the spam filter applied. It is an upper bound for "
+                     "every member, so a quiet group means all its tickers are quiet."),
+            "groups": gsum,
+        },
+        "sampling": {
+            "sort_order": "relevancy", "max_results": SAMPLE_MAX_RESULTS,
+            "samples": [{"key": k, "kind": p["kind"], "target": p["target"], "failed": run["samples"].get(k, {}).get("failed"),
+                         **sstats.get(k, {"posts": 0})}
+                        for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or [])
+                        for k in [p["key"]] if k in run["samples"]],
+            "min_distinct_authors": MIN_AUTHORS,
+            "candidates_found": sorted(t for t, a in agg.items() if len(a["authors"]) >= MIN_AUTHORS),
+        },
+        "risers_rule": ("rank_score >= %d and max(momentum_5h_vs_prev_day, momentum_last_hour_vs_prev_9h) >= %.1f; "
+                        "momentum = (now+1)/(baseline+1)" % (RISER_MIN_MENTIONS, RISER_MIN_RATIO)),
+        "risers": risers_out,
         "universe_source": {
             "repo": umeta.get("source_repo", FTD_REPO),
             "file": umeta.get("source_file", FTD_FILE),
@@ -338,55 +985,156 @@ def cmd_build(args):
             "fetched_at": umeta.get("fetched_at"),
         },
         "cadence": "every 5 hours",
-        "note": ("Ranks only the tickers measured in this run, all over the same UTC window. "
-                 "Not an exhaustive ranking of every cashtag on X."),
+        "note": ("Ranks the tickers counted individually in this run (core + carryover + tickers discovered "
+                 "via the group sweep and samples), all over the same UTC window. The whole non-core stock "
+                 "universe is screened at group level every run, but a ticker is only ranked if it was "
+                 "counted individually; discovery is sampled, so a busy ticker can still be missed."),
         "rankings": rankings,
     }
     write_json(LATEST_JSON, out)
     hist = os.path.join(HISTORY_DIR, now.strftime("%Y-%m-%dT%H%MZ") + ".json")
     write_json(hist, out)
 
-    state = load_json(STATE_JSON, {"tickers": {}})
-    for r in measured:
-        state["tickers"][r["ticker"]] = {
-            "mentions": int(r["mentions"]),
-            "window_end": plan["window_end"],
-            "measured_at": r["measured_at"],
-        }
-    state["updated_at"] = iso(now)
+    for e in entries:
+        state["tickers"][e["ticker"]] = {"mentions": e["mentions"], "window_end": run["window_end"],
+                                         "measured_at": run["counts"][e["ticker"]]["recorded_at"],
+                                         "tier": e["tier"], "source": e["source"]}
     state["tickers"] = dict(sorted(state["tickers"].items()))
+    state["risers"] = [{"ticker": r["ticker"], "mentions": r["mentions"], "window_end": run["window_end"]}
+                       for r in risers_out]
+    state["last_run_noncore"] = [{"ticker": e["ticker"], "mentions": e["mentions"], "window_end": run["window_end"],
+                                  "riser": "riser" in e["labels"]}
+                                 for e in entries if e["tier"] != "core"]
+    if etf_groups and run["etf_groups_total"]:
+        last = int(etf_groups[-1]["key"][1:]) - 1
+        state["etf_rotation_next"] = (last + 1) % run["etf_groups_total"]
+    state["method_version"] = METHOD_VERSION
+    state["updated_at"] = iso(now)
     write_json(STATE_JSON, state)
+    write_next(state, now)
+    print("wrote %s and %s: %d ranked, %d risers, reads %s, planned-not-measured %d"
+          % (os.path.relpath(LATEST_JSON, ROOT), os.path.relpath(hist, ROOT), len(rankings), len(risers_out),
+             json.dumps(out["x_reads_breakdown"]), len(not_measured)))
+    print("top 10:", ", ".join("%s %d%s" % (r["ticker"], r["mentions"], "*" if r["burst"] else "") for r in rankings[:10]))
+    print("risers:", ", ".join("%s %d (x%.1f/x%.1f)" % (r["ticker"], r["mentions"], r["momentum_5h_vs_prev_day"] or 0,
+                                                       r["momentum_last_hour_vs_prev_9h"]) for r in risers_out[:10]) or "-")
 
-    nxt = select_tickers(now + timedelta(hours=5))
+
+def write_next(state, now):
+    core = core_priority(state)
+    carry = [r["ticker"] for r in state.get("last_run_noncore", [])
+             if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS][:CARRYOVER_MAX]
     write_json(NEXT_JSON, {
         "generated_at": iso(now),
-        "note": "Tickers the next run will measure (recomputed by `plan` at run time).",
-        "query_pattern": QUERY_PATTERN,
-        "count": len(nxt),
-        "tickers": [{"ticker": t, "tier": tier} for t, tier in nxt],
+        "method": METHOD,
+        "note": ("Expected individual counts of the next run: core (strongest first; the weakest go into the "
+                 "group sweep) and carryover. Discovered tickers are only known during the run. "
+                 "Recomputed by `plan`/`pick-candidates` at run time."),
+        "query_pattern": BASE_QUERY,
+        "count": len(core[:CORE_INDIVIDUAL]) + len(carry),
+        "tickers": [{"ticker": t, "tier": "core"} for t in core[:CORE_INDIVIDUAL]] +
+                   [{"ticker": t, "tier": "carryover"} for t in carry],
+        "core_in_group_sweep": core[CORE_INDIVIDUAL:],
+        "etf_rotation_next": state.get("etf_rotation_next", 0),
     })
-    print("wrote %s and %s: %d ranked, %d reads used, %d planned-not-measured"
-          % (os.path.relpath(LATEST_JSON, ROOT), os.path.relpath(hist, ROOT),
-             len(rankings), reads_used, len(not_measured)))
-    print("top 10:", ", ".join("%s %d" % (r["ticker"], r["mentions"]) for r in rankings[:10]))
+
+
+def cmd_migrate(args):
+    """Bring method-v1 data files up to the v2 shape (idempotent, no X reads)."""
+    state = load_state()
+    latest = load_json(LATEST_JSON, {}) or {}
+    if not state["last_run_noncore"] and latest.get("rankings"):
+        # seed carryover from the last v1 run's non-core ("hot"/"rotation") tickers
+        state["last_run_noncore"] = [{"ticker": r["ticker"], "mentions": r["mentions"],
+                                      "window_end": latest["window_end"], "riser": False}
+                                     for r in latest["rankings"] if r.get("tier", "core") != "core"]
+    state["method_version"] = METHOD_VERSION
+    write_json(STATE_JSON, state)
+    write_next(state, utcnow())
+    print("state.json and next_tickers.json migrated to method v%d (latest.json/history untouched)" % METHOD_VERSION)
+
+
+# --- offline checks ----------------------------------------------------------
+def cmd_check(args):
+    universe = load_universe()
+    exclude = set(read_list("exclude_tickers.txt"))
+    state = load_state()
+    core = core_priority(state)
+    cs = set(core)
+    stock_nc = sorted(t for t, r in universe.items() if r["asset_type"] == "Stock" and t not in cs and t not in exclude)
+    etf_nc = sorted(t for t, r in universe.items() if r["asset_type"] == "ETF" and t not in cs and t not in exclude)
+    problems = []
+    for name, tick in (("stock", sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:]))), ("etf", etf_nc)):
+        groups = pack(tick)
+        flat = [t for g in groups for t in g]
+        if flat != tick:
+            problems.append("%s packing does not reproduce the ticker list" % name)
+        for g in groups:
+            q = group_query(g)
+            back = re.findall(r"\$([A-Z]{1,6})\b", q.split(") ", 1)[0])
+            if back != g:
+                problems.append("%s group %s: query does not parse back to its members" % (name, g[0]))
+            if len(q) > MAX_QUERY_LEN:
+                problems.append("%s group %s too long: %d" % (name, g[0], len(q)))
+        print("%s: %d tickers in %d groups (sizes %s..%s, longest query %d chars)"
+              % (name, len(tick), len(groups), min(map(len, groups)), max(map(len, groups)),
+                 max(len(group_query(g)) for g in groups)))
+    if not set(stock_nc) <= set(t for g in pack(sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:]))) for t in g):
+        problems.append("a non-core stock is missing from the sweep")
+    coll = collisions()
+    for t, extra in coll.items():
+        q = ticker_query(t, coll)
+        if len(q) > MAX_QUERY_LEN or q.count('"') % 2:
+            problems.append("collision query for %s is invalid: %s" % (t, q))
+    print("suffix (%d chars): %s" % (len(suffix()), suffix()))
+    print("collisions: %d (in universe: %d); spam accounts: %d; core: %d"
+          % (len(coll), sum(1 for t in coll if t in universe), len(spam_accounts()), len(core)))
+    t, ok = size_run(RUN_READS, len(pack(sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:])))), len(pack(etf_nc)))
+    print("default split of %d reads: %s (sum %d)" % (RUN_READS, json.dumps(t), sum(t.values())))
+    for p in problems:
+        print("PROBLEM:", p)
+    if problems:
+        sys.exit(1)
+    print("check OK")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("universe", help="refresh data/universe.csv from free-ticker-database")
-    p = sub.add_parser("plan", help="choose tickers + window for this run -> work/plan.json")
+    p = sub.add_parser("plan", help="window, budget, groups -> work/run.json")
     p.add_argument("--now", help="override current UTC time (YYYY-MM-DDTHH:MM:SSZ)")
-    p = sub.add_parser("record", help="append TICKER=COUNT results to work/counts.csv")
+    p.add_argument("--reads-left-today", type=int)
+    p = sub.add_parser("calls", help="print exact x tool arguments for pending calls of a stage")
+    p.add_argument("stage", choices=["groups", "samples", "counts"])
+    p.add_argument("key", nargs="*")
+    p.add_argument("--out", help="write JSON lines to this file instead")
+    p = sub.add_parser("record", help="record counts: KEY=TOTAL:b1,b2,...,b29 (29 hourly buckets, oldest first)")
     p.add_argument("pairs", nargs="*")
-    p.add_argument("--reads-left-today", type=int, help="'reads left today' from the last x tool result")
-    p.add_argument("--extra-reads", type=int, default=0, help="x reads spent without a usable count (errors, retries)")
-    sub.add_parser("status", help="show planned tickers not yet recorded")
+    p.add_argument("--reads-left-today", type=int)
+    p.add_argument("--extra-reads", type=int, default=0, help="reads spent without a usable result")
+    p = sub.add_parser("pick-samples", help="choose the next sample batch (stage 1 groups, stage 2 co-mentions)")
+    p.add_argument("--force", action="store_true")
+    p = sub.add_parser("record-sample", help="record the posts of one sample read")
+    p.add_argument("key")
+    p.add_argument("--json", help="file with the search_posts_all JSON result")
+    p.add_argument("--lines", help="file with one 'username | text' (or username<TAB>text) line per post")
+    p.add_argument("--failed", action="store_true", help="the read gave no usable result")
+    p.add_argument("--reads-left-today", type=int)
+    p = sub.add_parser("pick-candidates", help="final list of individual counts (core + carryover + discovered)")
+    p.add_argument("--reads-left-today", type=int)
+    p.add_argument("--force", action="store_true")
+    sub.add_parser("next", help="show the next step and the budget")
+    sub.add_parser("status", help="alias of next")
     p = sub.add_parser("build", help="write latest.json, history, state, next_tickers")
     p.add_argument("--extra-reads", type=int, default=0)
+    sub.add_parser("check", help="offline self-checks")
+    sub.add_parser("migrate", help="migrate state.json/next_tickers.json from the old method")
     args = ap.parse_args()
-    {"universe": cmd_universe, "plan": cmd_plan, "record": cmd_record,
-     "status": cmd_status, "build": cmd_build}[args.cmd](args)
+    {"universe": cmd_universe, "plan": cmd_plan, "calls": cmd_calls, "record": cmd_record,
+     "pick-samples": cmd_pick_samples, "record-sample": cmd_record_sample,
+     "pick-candidates": cmd_pick_candidates, "next": cmd_next, "status": cmd_next,
+     "build": cmd_build, "check": cmd_check, "migrate": cmd_migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":

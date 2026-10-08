@@ -1,0 +1,58 @@
+# Cashtag collisions: listed tickers whose cashtag is also used for a crypto coin/token,
+# a greeting or other non-stock meaning. For these tickers the INDIVIDUAL count query is
+#   $TICKER -is:retweet <spam_filter.txt terms> <extra terms below>
+# and that filtered count is the one that is ranked (entry gets label "collision-filtered").
+# Format: TICKER [extra X search terms...]   '#' starts a comment.
+# (Tickers fully dominated by a coin are excluded instead: config/exclude_tickers.txt.)
+GM   -coinmarketcap -"listing id" -bnb -wallet        # GM token / "gm" vote templates: 245 -> 30 (2026-10-08)
+AI   -coinmarketcap -"listing id" -bnb -wallet -"ai agent" -virtuals   # C3.ai vs AI-agent tokens
+U    -coinmarketcap -"listing id" -bnb -wallet        # Unity vs tokens
+STX  -stacks -sbtc -bitcoin -coinmarketcap -bnb       # Seagate vs Stacks
+SKY  -usds -maker -coinmarketcap -bnb                 # Champion Homes vs Sky (ex-Maker)
+PUMP -coinmarketcap -bnb -wallet                      # ProPetro vs pump.fun token
+S    -sonic -fantom -coinmarketcap -bnb               # SentinelOne vs Sonic
+W    -wormhole -coinmarketcap -bnb                    # Wayfair vs Wormhole
+SI   -coinmarketcap -"listing id" -bnb -wallet        # vote templates seen 2026-10-08
+SM   -coinmarketcap -"listing id" -bnb -wallet        # vote templates seen 2026-10-08
+SEB  -coinmarketcap -bnb
+OPEN -coinmarketcap -bnb -wallet
+IP   -story -coinmarketcap -bnb                       # International Paper vs Story Protocol
+OM   -mantra -coinmarketcap -bnb                      # Outset Medical vs MANTRA
+ENS  -ethereum -coinmarketcap -bnb                    # EnerSys vs ENS
+CAT  -coinmarketcap -bnb -wallet
+COMP -compound -coinmarketcap -bnb
+DASH -coinmarketcap -bnb
+SNX  -synthetix -coinmarketcap -bnb
+BCH  -bitcoin -coinmarketcap -bnb
+XPL  -plasma -coinmarketcap -bnb
+NEO  -coinmarketcap -bnb
+HIVE -coinmarketcap -bnb
+ACA
+ACT
+ALT
+AR
+AVNT
+AXS
+BAND
+BEAM
+BNT
+CAKE
+CVX
+ELF
+FLOW
+GT
+JOE
+LUNC
+MLN
+MOVE
+NMR
+NU
+NXT
+OGN
+ONT
+QNT
+QTUM
+REZ
+TIME
+TOKE
+AGIX

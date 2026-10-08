@@ -1,0 +1,20 @@
+# Spam filter terms appended (after "-is:retweet") to every GROUP count query, every
+# SAMPLE query and every COLLISION ticker's individual count query.
+# One X search term per line, exactly as it goes into the query; '#' starts a comment.
+# Measured 2026-10-08: on a 457-stock group this suffix removed ~52% of the posts
+# (vote/listing templates, memecoin shills); on $NVDA/$TSLA/$MU/$SPY it removed ~10%.
+# Every extra term makes the group queries longer (fewer tickers per 4096-char group ->
+# possibly one more group = one more read per run). Keep it short.
+-vote
+-leaderboard
+-"stock analyst"
+-whatsapp
+-airdrop
+-memecoin
+-solana
+-dexscreener
+-gmgn
+-mcap
+-token
+-crypto
+-"pump.fun"
