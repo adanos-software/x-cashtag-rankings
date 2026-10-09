@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """X stock cashtag rankings: group-sweep screening + sampling + exact counts (stdlib only).
 
-One run (details: README.md and the maintainer runbook):
+One run (details: README.md and docs/RUNBOOK.md). X calls are made strictly ONE AT A TIME:
 
   python3 scripts/build_rankings.py plan [--reads-left-today N]   # window, groups, budget -> work/run.json
-  python3 scripts/build_rankings.py calls groups                  # exact x tool arguments for the group counts
-  python3 scripts/build_rankings.py record S01=1471:364,344,... [--reads-left-today N]
-  python3 scripts/build_rankings.py pick-samples                  # stage 1: hottest groups to sample
-  python3 scripts/build_rankings.py calls samples
-  python3 scripts/build_rankings.py record-sample smp-S07 --json work/samples/smp-S07.json [--reads-left-today N]
-  python3 scripts/build_rankings.py pick-samples                  # stage 2: co-mention samples
-  ... record-sample ...
-  python3 scripts/build_rankings.py pick-candidates [--reads-left-today N]   # final individual list
-  python3 scripts/build_rankings.py calls counts
-  python3 scripts/build_rankings.py record NVDA=343:... MU=310:... [--reads-left-today N]
-  python3 scripts/build_rankings.py build
-  python3 scripts/build_rankings.py next        # at any time: what to do next + budget
-  python3 scripts/build_rankings.py check       # offline self-checks (packing coverage, config)
+  loop:
+    python3 scripts/build_rankings.py next-call      # prints the ONE next X call (or the next script step)
+    -> make that single x tool call
+    python3 scripts/build_rankings.py record KEY=TOTAL:b1,...,b29 --reads-left-today B     (counts; pauses 4s)
+    python3 scripts/build_rankings.py record-sample KEY --lines FILE --reads-left-today B  (samples; pauses 4s)
+    python3 scripts/build_rankings.py record-error KEY --kind 429|other --reads-left-today B   (on errors;
+        prints WAIT 60s / WAIT 120s / RETRY / GIVE UP / STOP)
+    script steps when next-call says so: pick-samples (twice), pick-candidates
+  python3 scripts/build_rankings.py build          # complete run, or partial if group sweep + core are done
+  python3 scripts/build_rankings.py abandon --reason "..."   # archive an unpublishable run
+  python3 scripts/build_rankings.py next | check | calls STAGE [--all]
 
 Every count read uses granularity=hour over the last 29 full UTC hours, so one read gives the
 5h window (last 5 buckets), the same 5 hours yesterday (first 5 buckets) and the hourly shape.
@@ -31,6 +29,7 @@ import os
 import re
 import statistics
 import sys
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -46,6 +45,7 @@ NEXT_JSON = os.path.join(DATA, "next_tickers.json")
 LATEST_JSON = os.path.join(DATA, "latest.json")
 HISTORY_DIR = os.path.join(DATA, "history")
 RUN_JSON = os.path.join(WORK, "run.json")
+ARCHIVE = os.path.join(WORK, "archive")
 
 # --- method parameters -------------------------------------------------------
 METHOD = "group-sweep+sampling+counts"
@@ -68,7 +68,11 @@ CARRYOVER_MIN_MENTIONS = 25  # ... non-core tickers with >= this many mentions l
 CARRYOVER_MAX_AGE_HOURS = 12
 CORE_INDIVIDUAL = 50         # core tickers counted individually; the weakest rest go into the sweep
 CORE_FLOOR = 10              # budget shrink: core is cut first, down to this
-SPARE = 5                    # reserved for retries / invalid requests
+SPARE = 5                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
+RETRY_RESERVE = 10           # extra reads per run for retries (429 / errors), on top of RUN_READS -> max ~105
+MAX_OTHER_ERRORS = 5         # stop the run after this many non-429 errors
+PACE_SECONDS = 4             # record commands pause this long, so calls stay strictly sequential (<= ~15/min)
+WAIT_429 = (60, 120)         # wait before the 1st and the 2nd (last) retry of a call that got HTTP 429
 MIN_AUTHORS = 2              # a sampled ticker needs >= 2 distinct (non-spam) authors to be a candidate
 MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are list spam -> ignored for discovery
 TEMPLATE_MIN_AUTHORS = 3     # same normalized text from >= 3 authors -> template spam
@@ -348,6 +352,7 @@ def load_run():
     run = load_json(RUN_JSON)
     if not run or run.get("method_version") != METHOD_VERSION:
         sys.exit("work/run.json missing or from the old method; run: python3 scripts/build_rankings.py plan")
+    log_defaults(run)
     return run
 
 
@@ -362,16 +367,61 @@ def note_reads_left(run, n):
         run["log"]["reads_left_history"].append([iso(utcnow()), n])
 
 
+def log_defaults(run):
+    lg = run["log"]
+    lg.setdefault("extra_reads", 0)
+    lg.setdefault("retries_429", 0)
+    lg.setdefault("errors_other", 0)
+    lg.setdefault("attempts", {})
+    run.setdefault("skipped", [])
+    run.setdefault("stopped", None)
+    return lg
+
+
+def planned_used(run):
+    return len(run["counts"]) + len(run["samples"])
+
+
 def reads_used(run):
-    return len(run["counts"]) + len(run["samples"]) + int(run["log"].get("extra_reads", 0))
+    return planned_used(run) + int(run["log"].get("extra_reads", 0))
+
+
+def retry_left(run):
+    return max(0, RETRY_RESERVE - int(run["log"].get("extra_reads", 0)))
 
 
 def reads_remaining(run):
-    rem = run["budget"] - reads_used(run)
+    """Reads left for PLANNED calls; the retry reserve is kept free under the daily cap too."""
+    rem = run["budget"] - planned_used(run)
     left = run["log"].get("reads_left_today")
     if left is not None:
-        rem = min(rem, left - FLOOR_LEFT)
+        rem = min(rem, left - FLOOR_LEFT - retry_left(run))
     return max(0, rem)
+
+
+def pace(args):
+    if not getattr(args, "no_sleep", False):
+        time.sleep(PACE_SECONDS)
+        print("(paused %ds; make the next X call only after this command returned)" % PACE_SECONDS)
+
+
+def archive_run(tag):
+    """Move work/run.json (+ work/samples) to work/archive/<planned_at>-<tag>/ ."""
+    if not os.path.exists(RUN_JSON):
+        return None
+    run = load_json(RUN_JSON, {}) or {}
+    stamp = (run.get("planned_at") or iso(utcnow())).replace(":", "").replace("-", "")
+    dest = os.path.join(ARCHIVE, "%s-%s" % (stamp, tag))
+    n = 1
+    while os.path.exists(dest):
+        n += 1
+        dest = os.path.join(ARCHIVE, "%s-%s-%d" % (stamp, tag, n))
+    os.makedirs(dest)
+    os.replace(RUN_JSON, os.path.join(dest, "run.json"))
+    smp = os.path.join(WORK, "samples")
+    if os.path.isdir(smp):
+        os.replace(smp, os.path.join(dest, "samples"))
+    return dest
 
 
 # --- plan --------------------------------------------------------------------
@@ -384,7 +434,7 @@ def cmd_plan(args):
     exclude = set(read_list("exclude_tickers.txt"))
     budget = RUN_READS
     if args.reads_left_today is not None:
-        budget = min(RUN_READS, args.reads_left_today - FLOOR_LEFT)
+        budget = min(RUN_READS, args.reads_left_today - FLOOR_LEFT - RETRY_RESERVE)
         if budget < MIN_RUN_READS:
             print("SKIP: only %d reads fit under the daily cap (reads left %d, floor %d); do not run."
                   % (budget, args.reads_left_today, FLOOR_LEFT))
@@ -422,7 +472,9 @@ def cmd_plan(args):
         g["query_len"] = len(g["query"])
     os.makedirs(WORK, exist_ok=True)
     if os.path.exists(RUN_JSON):
-        os.replace(RUN_JSON, RUN_JSON + ".prev-" + now.strftime("%Y%m%dT%H%M%SZ"))
+        prev = load_json(RUN_JSON, {}) or {}
+        dest = archive_run("built" if prev.get("built_at") else "unfinished")
+        print("archived previous run to %s" % os.path.relpath(dest, ROOT))
     run = {
         "method_version": METHOD_VERSION,
         "planned_at": iso(now),
@@ -441,7 +493,10 @@ def cmd_plan(args):
         "counts": {},
         "samples": {},
         "picks": {"samples1": None, "samples2": None, "individual": None},
-        "log": {"reads_left_today": args.reads_left_today, "reads_left_history": [], "extra_reads": 0},
+        "log": {"reads_left_today": args.reads_left_today, "reads_left_history": [], "extra_reads": 0,
+                "retries_429": 0, "errors_other": 0, "attempts": {}},
+        "skipped": [],
+        "stopped": None,
     }
     if args.reads_left_today is not None:
         run["log"]["reads_left_history"].append([iso(now), args.reads_left_today])
@@ -452,7 +507,7 @@ def cmd_plan(args):
     print("groups: %d stock (%d tickers incl. %d demoted core) + ETF %s of %d"
           % (len(stock_groups), run["stock_tickers_swept"], len(demoted),
              ",".join(g["key"] for g in groups if g["kind"] == "etf") or "-", n))
-    print("next: python3 scripts/build_rankings.py calls groups")
+    print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
 
 
 # --- calls (exact tool arguments) ---------------------------------------------
@@ -468,19 +523,30 @@ def sample_args(run, query):
 
 def pending_calls(run, stage):
     out = []
+    skipped = set(run.get("skipped") or [])
     if stage == "groups":
         for g in run["groups"]:
-            if g["key"] not in run["counts"]:
+            if g["key"] not in run["counts"] and g["key"] not in skipped:
                 out.append((g["key"], "get_posts_counts_recent", count_args(run, g["query"])))
     elif stage == "samples":
         for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or []):
-            if p["key"] not in run["samples"]:
+            if p["key"] not in run["samples"] and p["key"] not in skipped:
                 out.append((p["key"], "search_posts_all", sample_args(run, p["query"])))
     elif stage == "counts":
         for p in run["picks"]["individual"] or []:
-            if p["ticker"] not in run["counts"]:
+            if p["ticker"] not in run["counts"] and p["ticker"] not in skipped:
                 out.append((p["ticker"], "get_posts_counts_recent", count_args(run, p["query"])))
     return out
+
+
+PACING_NOTE = ("PACING: X calls strictly one at a time (never parallel tool calls). After each call, run its "
+               "record command (it pauses %ds) before the next call -> at most ~15 calls per minute. "
+               "On an error run record-error and follow its instruction." % PACE_SECONDS)
+
+
+def print_call(k, tool, a):
+    print("## %s  -> namespace x, tool %s" % (k, tool))
+    print(json.dumps(a, ensure_ascii=False))
 
 
 def cmd_calls(args):
@@ -488,16 +554,104 @@ def cmd_calls(args):
     calls = pending_calls(run, args.stage)
     if args.key:
         calls = [c for c in calls if c[0] in args.key]
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as f:
-            for k, tool, a in calls:
-                f.write(json.dumps({"key": k, "namespace": "x", "tool": tool, "arguments": a}) + "\n")
-        print("%d pending %s calls written to %s" % (len(calls), args.stage, args.out))
+    if args.all:
+        print("# LIST FOR REVIEW ONLY - do not batch these. Use `next-call` and make ONE call at a time.")
+        for k, tool, a in calls:
+            print_call(k, tool, a)
+    elif calls:
+        print_call(*calls[0])
+    print("# %d pending %s calls; remaining run budget %d planned reads (+%d retry reserve)"
+          % (len(calls), args.stage, reads_remaining(run), retry_left(run)))
+    print("# " + PACING_NOTE)
+
+
+def next_action(run):
+    """(kind, payload): kind in stop/call/pick-samples/pick-candidates/build."""
+    if run.get("stopped"):
+        return "stop", run["stopped"]
+    for stage, gate in (("groups", None), ("samples", "samples1"), ("counts", "individual")):
+        if stage == "samples" and run["picks"]["samples1"] is None:
+            return "pick-samples", "stage 1"
+        if stage == "counts":
+            if run["picks"]["samples2"] is None:
+                return "pick-samples", "stage 2"
+            if run["picks"]["individual"] is None:
+                return "pick-candidates", None
+        calls = pending_calls(run, stage)
+        if calls:
+            return "call", (stage, calls)
+    return "build", None
+
+
+def record_hint(stage, key):
+    if stage == "samples":
+        return ("python3 scripts/build_rankings.py record-sample %s --lines work/samples/%s.txt "
+                "--reads-left-today <B>" % (key, key))
+    return "python3 scripts/build_rankings.py record %s=<TOTAL>:<29 buckets> --reads-left-today <B>" % key
+
+
+def cmd_next_call(args):
+    run = load_run()
+    kind, payload = next_action(run)
+    if kind != "call":
+        cmd_next(args)
         return
-    for k, tool, a in calls:
-        print("## %s  -> namespace x, tool %s" % (k, tool))
-        print(json.dumps(a, ensure_ascii=False))
-    print("# %d pending %s calls; remaining run budget %d reads" % (len(calls), args.stage, reads_remaining(run)))
+    stage, calls = payload
+    k, tool, a = calls[0]
+    print_call(k, tool, a)
+    print("# then: " + record_hint(stage, k))
+    print("# on an error/429: python3 scripts/build_rankings.py record-error %s --kind 429|other --reads-left-today <B>" % k)
+    print("# %d %s calls pending incl. this one; remaining %d planned reads (+%d retry reserve)"
+          % (len(calls), stage, reads_remaining(run), retry_left(run)))
+    print("# " + PACING_NOTE)
+
+
+def stop_checks(run):
+    """Set run['stopped'] when a stop rule fires; returns the message or None."""
+    lg = run["log"]
+    left = lg.get("reads_left_today")
+    msg = None
+    if lg.get("errors_other", 0) >= MAX_OTHER_ERRORS:
+        msg = "%d non-429 errors (limit %d)" % (lg["errors_other"], MAX_OTHER_ERRORS)
+    elif int(lg.get("extra_reads", 0)) >= RETRY_RESERVE and any(
+            pending_calls(run, st) for st in ("groups", "samples", "counts")):
+        msg = "retry reserve of %d reads used up" % RETRY_RESERVE
+    elif left is not None and left <= FLOOR_LEFT:
+        msg = "reads left today at/below %d (daily cap)" % FLOOR_LEFT
+    if msg and not run.get("stopped"):
+        run["stopped"] = msg
+    return msg
+
+
+def partial_ok(run):
+    """A run that did not finish may still be built (labelled partial) if the whole group sweep
+    and all planned core counts are done."""
+    miss = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
+    if miss:
+        return False, "group sweep incomplete: %s" % ",".join(miss)
+    picks = run["picks"].get("individual")
+    if not picks:
+        return False, "candidates/core not picked yet, core not counted"
+    core_miss = [p["ticker"] for p in picks if p["source"] == "core" and p["ticker"] not in run["counts"]]
+    if core_miss:
+        return False, "core not fully counted (%d missing: %s)" % (len(core_miss), ",".join(core_miss[:10]))
+    return True, None
+
+
+def run_complete(run):
+    if run.get("skipped") or run.get("stopped"):
+        return False
+    if run["picks"].get("individual") is None:
+        return False
+    return not any(pending_calls(run, st) for st in ("groups", "samples", "counts"))
+
+
+def stop_advice(run):
+    ok, why = partial_ok(run)
+    if ok:
+        return "build now (it is labelled partial): python3 scripts/build_rankings.py build"
+    return ("cannot build (%s); archive the run: python3 scripts/build_rankings.py abandon --reason '<why>' "
+            "and report the failure" % why)
 
 
 # --- record counts -----------------------------------------------------------
@@ -533,20 +687,28 @@ def cmd_record(args):
             errors += 1
             continue
         run["counts"][key] = {"buckets": buckets, "recorded_at": iso(utcnow())}
-    run["log"]["extra_reads"] += args.extra_reads
+    if args.extra_reads:
+        run["log"]["extra_reads"] += args.extra_reads
+        run["log"]["errors_other"] += args.extra_reads
     note_reads_left(run, args.reads_left_today)
+    msg = stop_checks(run)
     save_run(run)
-    print("recorded %d, errors %d; run reads used %d, remaining %d; reads left today %s"
-          % (len(args.pairs) - errors, errors, reads_used(run), reads_remaining(run), run["log"]["reads_left_today"]))
+    print("recorded %d, errors %d; run reads used %d (planned %d + retries/errors %d), remaining %d planned "
+          "(+%d retry reserve); reads left today %s"
+          % (len(args.pairs) - errors, errors, reads_used(run), planned_used(run), run["log"]["extra_reads"],
+             reads_remaining(run), retry_left(run), run["log"]["reads_left_today"]))
     left = run["log"]["reads_left_today"]
-    if left is not None and reads_used(run) <= 2 and left - FLOOR_LEFT < MIN_RUN_READS:
-        print("SKIP RUN: only %d reads fit under the daily cap; stop now, do not build or commit." % (left - FLOOR_LEFT))
-    elif left is not None and left <= FLOOR_LEFT:
-        print("STOP: reads left today at/below %d; build with what you have." % FLOOR_LEFT)
+    if left is not None and planned_used(run) <= 2 and left - FLOOR_LEFT - RETRY_RESERVE < MIN_RUN_READS:
+        print("SKIP RUN: only %d reads fit under the daily cap (after the %d-read retry reserve); stop now, "
+              "run `abandon --reason skip`, do not build or commit." % (left - FLOOR_LEFT - RETRY_RESERVE, RETRY_RESERVE))
+    elif msg:
+        print("STOP: %s. %s" % (msg, stop_advice(run)))
     elif reads_remaining(run) == 0 and any(pending_calls(run, st) for st in ("groups", "samples", "counts")):
-        print("STOP: run budget exhausted; build with what you have (unmeasured go to planned_not_measured).")
+        print("STOP: run budget exhausted. " + stop_advice(run))
     if errors:
         sys.exit(1)
+    if args.pairs:
+        pace(args)
 
 
 # --- samples -----------------------------------------------------------------
@@ -641,7 +803,7 @@ def cmd_pick_samples(args):
         save_run(run)
         print("stage 1: sample %s" % ", ".join("%s (heat %.1f)" % (p["target"], p["heat"]) for p in picks["samples1"]))
         print("group heat ranking:", ", ".join("%s %.1f" % (g["key"], m["heat"]) for g, m in gm))
-        print("next: python3 scripts/build_rankings.py calls samples")
+        print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
         return
     pend1 = [p["key"] for p in picks["samples1"] if p["key"] not in run["samples"]]
     if pend1 and not args.force:
@@ -663,7 +825,7 @@ def cmd_pick_samples(args):
                               "query": sample_ticker_query(t, coll)} for t in chosen]
         save_run(run)
         print("stage 2 (co-mentions): %s" % (", ".join(chosen) or "none"))
-        print("next: python3 scripts/build_rankings.py calls samples   (or pick-candidates if none pending)")
+        print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
         return
     print("samples already picked; next: record pending samples, then pick-candidates")
 
@@ -702,9 +864,62 @@ def cmd_record_sample(args):
         sys.exit("give --json FILE, --lines FILE or --failed")
     run["samples"][args.key] = {"posts": posts or [], "failed": posts is None, "recorded_at": iso(utcnow())}
     note_reads_left(run, args.reads_left_today)
+    msg = stop_checks(run)
     save_run(run)
-    print("%s: %s posts; run reads used %d, remaining %d" % (args.key, "failed" if posts is None else len(posts),
-                                                              reads_used(run), reads_remaining(run)))
+    print("%s: %s posts; run reads used %d, remaining %d planned (+%d retry reserve)"
+          % (args.key, "failed" if posts is None else len(posts), reads_used(run), reads_remaining(run), retry_left(run)))
+    if msg:
+        print("STOP: %s. %s" % (msg, stop_advice(run)))
+    pace(args)
+
+
+def cmd_record_error(args):
+    """One X read that gave no usable result. Decides retry / wait / give up and applies the stop rules."""
+    run = load_run()
+    lg = run["log"]
+    key = args.key if args.key.startswith("smp-") else args.key.upper()
+    pending = {k for st in ("groups", "samples", "counts") for k, *_ in pending_calls(run, st)}
+    if key not in pending:
+        sys.exit("%s is not a pending call (already recorded or skipped?)" % key)
+    att = lg["attempts"].setdefault(key, [])
+    att.append({"kind": args.kind, "at": iso(utcnow()), "detail": (args.detail or "")[:200]})
+    lg["extra_reads"] += 1
+    if args.kind == "429":
+        lg["retries_429"] += 1
+    else:
+        lg["errors_other"] += 1
+    note_reads_left(run, args.reads_left_today)
+    n429 = sum(1 for a in att if a["kind"] == "429")
+    noth = sum(1 for a in att if a["kind"] != "429")
+    give_up = n429 > len(WAIT_429) or noth >= 2
+    if give_up:
+        run["skipped"].append(key)
+    msg = stop_checks(run)
+    save_run(run)
+    print("%s: %s error recorded (attempts: %d x 429, %d other); run retries/errors %d of reserve %d, "
+          "non-429 errors %d of %d" % (key, args.kind, n429, noth, lg["extra_reads"], RETRY_RESERVE,
+                                       lg["errors_other"], MAX_OTHER_ERRORS))
+    if msg:
+        print("STOP: %s. %s" % (msg, stop_advice(run)))
+    elif give_up:
+        print("GIVE UP on %s (no more retries); it is skipped and reported as missing. Continue with next-call "
+              "after a %ds pause." % (key, PACE_SECONDS))
+    elif args.kind == "429":
+        w = WAIT_429[n429 - 1]
+        print("WAIT %ds, then retry the SAME call (%s). Shell: sleep %d  (set block_until_ms >= %d)"
+              % (w, "1st retry" if n429 == 1 else "last try", w, (w + 15) * 1000))
+    else:
+        print("RETRY the same call once after the normal %ds pause." % PACE_SECONDS)
+
+
+def cmd_abandon(args):
+    if not os.path.exists(RUN_JSON):
+        sys.exit("no work/run.json to abandon")
+    run = load_json(RUN_JSON, {})
+    run["abandoned"] = {"at": iso(utcnow()), "reason": args.reason}
+    write_json(RUN_JSON, run)
+    dest = archive_run("abandoned")
+    print("archived to %s (nothing published). Reason: %s" % (os.path.relpath(dest, ROOT), args.reason))
 
 
 # --- candidates --------------------------------------------------------------
@@ -781,7 +996,7 @@ def cmd_pick_candidates(args):
         by[p["source"]] = by.get(p["source"], 0) + 1
     print("individual counts: %d %s (remaining budget %d, spare %d)" % (len(picks), json.dumps(by), rem, spare))
     print("discovered:", ", ".join("%s(%d)" % (t, len(a["authors"])) for t, a in disc[:30]) or "-")
-    print("next: python3 scripts/build_rankings.py calls counts")
+    print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
 
 
 # --- next / status -----------------------------------------------------------
@@ -791,16 +1006,24 @@ def cmd_next(args):
     print("window %s -> %s UTC; run reads used %d of budget %d, remaining %d; reads left today %s (floor %d)"
           % (run["window_start"], run["window_end"], reads_used(run), run["budget"], reads_remaining(run),
              left, FLOOR_LEFT))
+    lg = run["log"]
+    print("retries/errors %d of reserve %d (429: %d, other: %d of max %d); skipped: %s"
+          % (lg["extra_reads"], RETRY_RESERVE, lg["retries_429"], lg["errors_other"], MAX_OTHER_ERRORS,
+             ", ".join(run["skipped"]) or "-"))
+    if run.get("stopped"):
+        print("STOPPED: %s. %s" % (run["stopped"], stop_advice(run)))
+        return
     g = pending_calls(run, "groups")
     if g:
-        print("NEXT: group counts pending (%d): %s  -> calls groups / record" % (len(g), " ".join(k for k, *_ in g)))
+        print("NEXT: group counts pending (%d): %s  -> next-call / record, ONE call at a time"
+              % (len(g), " ".join(k for k, *_ in g)))
         return
     if run["picks"]["samples1"] is None:
         print("NEXT: pick-samples (stage 1)")
         return
     s = pending_calls(run, "samples")
     if s:
-        print("NEXT: samples pending: %s  -> calls samples / record-sample" % " ".join(k for k, *_ in s))
+        print("NEXT: samples pending: %s  -> next-call / record-sample, ONE call at a time" % " ".join(k for k, *_ in s))
         return
     if run["picks"]["samples2"] is None:
         print("NEXT: pick-samples (stage 2)")
@@ -810,7 +1033,7 @@ def cmd_next(args):
         return
     c = pending_calls(run, "counts")
     if c:
-        print("NEXT: individual counts pending (%d): %s  -> calls counts / record"
+        print("NEXT: individual counts pending (%d): %s  -> next-call / record, ONE call at a time"
               % (len(c), " ".join(k for k, *_ in c)))
         return
     print("NEXT: build")
@@ -823,7 +1046,19 @@ def hour_iso(run, idx):
 
 def cmd_build(args):
     run = load_run()
-    run["log"]["extra_reads"] += args.extra_reads
+    if args.extra_reads:
+        run["log"]["extra_reads"] += args.extra_reads
+        run["log"]["errors_other"] += args.extra_reads
+    complete = run_complete(run)
+    partial_reason = None
+    if not complete:
+        ok, why = partial_ok(run)
+        if not ok:
+            sys.exit("cannot build: run incomplete and not publishable as partial (%s). "
+                     "Archive it with: python3 scripts/build_rankings.py abandon --reason '...'" % why)
+        missing = [k for st in ("samples", "counts") for k, *_ in pending_calls(run, st)] + list(run["skipped"])
+        partial_reason = "%s; not measured: %s" % (run.get("stopped") or "run ended early",
+                                                   ", ".join(missing) or "-")
     picks = run["picks"]["individual"] or []
     measured = [p for p in picks if p["ticker"] in run["counts"]]
     if not measured:
@@ -944,7 +1179,11 @@ def cmd_build(args):
         "planned_not_measured": not_measured,
         "x_reads_used": n_groups + n_smp + n_ind + extra,
         "x_reads_breakdown": {"group_counts": n_groups, "samples": n_smp, "individual_counts": n_ind,
-                              "extra_errors_retries": extra},
+                              "extra_errors_retries": extra,
+                              "retries_429": int(run["log"].get("retries_429", 0)),
+                              "errors_other": int(run["log"].get("errors_other", 0))},
+        "partial": not complete,
+        "partial_reason": partial_reason,
         "x_reads_left_today": run["log"].get("reads_left_today"),
         "ranking_rule": ("rank_score = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
                          "median, %d) whose next hour fell below a third of it) is capped at that limit; "
@@ -985,7 +1224,8 @@ def cmd_build(args):
             "fetched_at": umeta.get("fetched_at"),
         },
         "cadence": "every 5 hours",
-        "note": ("Ranks the tickers counted individually in this run (core + carryover + tickers discovered "
+        "note": (("PARTIAL RUN (%s). " % partial_reason if partial_reason else "") +
+                 "Ranks the tickers counted individually in this run (core + carryover + tickers discovered "
                  "via the group sweep and samples), all over the same UTC window. The whole non-core stock "
                  "universe is screened at group level every run, but a ticker is only ranked if it was "
                  "counted individually; discovery is sampled, so a busy ticker can still be missed."),
@@ -994,6 +1234,9 @@ def cmd_build(args):
     write_json(LATEST_JSON, out)
     hist = os.path.join(HISTORY_DIR, now.strftime("%Y-%m-%dT%H%MZ") + ".json")
     write_json(hist, out)
+    run["built_at"] = iso(now)
+    run["built_partial"] = not complete
+    save_run(run)
 
     for e in entries:
         state["tickers"][e["ticker"]] = {"mentions": e["mentions"], "window_end": run["window_end"],
@@ -1012,6 +1255,8 @@ def cmd_build(args):
     state["updated_at"] = iso(now)
     write_json(STATE_JSON, state)
     write_next(state, now)
+    if partial_reason:
+        print("PARTIAL build: " + partial_reason)
     print("wrote %s and %s: %d ranked, %d risers, reads %s, planned-not-measured %d"
           % (os.path.relpath(LATEST_JSON, ROOT), os.path.relpath(hist, ROOT), len(rankings), len(risers_out),
              json.dumps(out["x_reads_breakdown"]), len(not_measured)))
@@ -1108,19 +1353,29 @@ def main():
     p = sub.add_parser("calls", help="print exact x tool arguments for pending calls of a stage")
     p.add_argument("stage", choices=["groups", "samples", "counts"])
     p.add_argument("key", nargs="*")
-    p.add_argument("--out", help="write JSON lines to this file instead")
+    p.add_argument("--all", action="store_true", help="list all pending calls (review only; never batch them)")
     p = sub.add_parser("record", help="record counts: KEY=TOTAL:b1,b2,...,b29 (29 hourly buckets, oldest first)")
     p.add_argument("pairs", nargs="*")
     p.add_argument("--reads-left-today", type=int)
-    p.add_argument("--extra-reads", type=int, default=0, help="reads spent without a usable result")
+    p.add_argument("--extra-reads", type=int, default=0, help="(legacy) non-429 error reads; prefer record-error")
+    p.add_argument("--no-sleep", action="store_true", help="skip the pacing pause (tests only)")
     p = sub.add_parser("pick-samples", help="choose the next sample batch (stage 1 groups, stage 2 co-mentions)")
     p.add_argument("--force", action="store_true")
     p = sub.add_parser("record-sample", help="record the posts of one sample read")
     p.add_argument("key")
     p.add_argument("--json", help="file with the search_posts_all JSON result")
     p.add_argument("--lines", help="file with one 'username | text' (or username<TAB>text) line per post")
-    p.add_argument("--failed", action="store_true", help="the read gave no usable result")
+    p.add_argument("--failed", action="store_true", help="the read returned, but with no usable posts")
     p.add_argument("--reads-left-today", type=int)
+    p.add_argument("--no-sleep", action="store_true", help="skip the pacing pause (tests only)")
+    p = sub.add_parser("record-error", help="record a read that failed (HTTP 429 or other) and get retry advice")
+    p.add_argument("key")
+    p.add_argument("--kind", choices=["429", "other"], required=True)
+    p.add_argument("--detail", help="short error text")
+    p.add_argument("--reads-left-today", type=int)
+    sub.add_parser("next-call", help="print the ONE next X call to make (and how to record it)")
+    p = sub.add_parser("abandon", help="archive an unfinished run without publishing")
+    p.add_argument("--reason", required=True)
     p = sub.add_parser("pick-candidates", help="final list of individual counts (core + carryover + discovered)")
     p.add_argument("--reads-left-today", type=int)
     p.add_argument("--force", action="store_true")
@@ -1134,6 +1389,7 @@ def main():
     {"universe": cmd_universe, "plan": cmd_plan, "calls": cmd_calls, "record": cmd_record,
      "pick-samples": cmd_pick_samples, "record-sample": cmd_record_sample,
      "pick-candidates": cmd_pick_candidates, "next": cmd_next, "status": cmd_next,
+     "record-error": cmd_record_error, "next-call": cmd_next_call, "abandon": cmd_abandon,
      "build": cmd_build, "check": cmd_check, "migrate": cmd_migrate}[args.cmd](args)
 
 

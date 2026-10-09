@@ -94,8 +94,8 @@ class Budget(unittest.TestCase):
         r = run("plan", "--now", "2026-10-08T14:14:00Z", "--reads-left-today", "460")
         self.assertEqual(r.returncode, 0, r.stderr)
         plan = json.load(open(os.path.join(TMP, "work", "run.json")))
-        self.assertEqual(plan["budget"], 60)
-        self.assertEqual(sum(plan["targets"].values()), 60)
+        self.assertEqual(plan["budget"], 50)          # 460 - 400 floor - 10 retry reserve
+        self.assertEqual(sum(plan["targets"].values()), 50)
         self.assertEqual(plan["window_start"], "2026-10-08T09:00:00Z")
         self.assertEqual(plan["history_start"], "2026-10-07T09:00:00Z")
         swept = {t for g in plan["groups"] if g["kind"] == "stock" for t in g["tickers"]}
@@ -191,6 +191,144 @@ class Migration(unittest.TestCase):
         r = run("check")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("check OK", r.stdout)
+
+
+Z29 = ",".join(["10"] * 29)
+
+
+def runjson():
+    return json.load(open(os.path.join(TMP, "work", "run.json")))
+
+
+class RunFlow(unittest.TestCase):
+    """Sequential-run mechanics: one call at a time, 429 handling, stop rules, partial build, archive."""
+
+    def plan(self, left="900"):
+        r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", left)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def record_groups(self, skip=()):
+        keys = [g["key"] for g in runjson()["groups"] if g["key"] not in skip]
+        r = run("record", *["%s=290:%s" % (k, Z29) for k in keys], "--reads-left-today", "880", "--no-sleep")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def do_samples(self):
+        for _ in range(2):
+            run("pick-samples")
+            for p in (runjson()["picks"]["samples1"] or []) + (runjson()["picks"]["samples2"] or []):
+                if p["key"] not in runjson()["samples"]:
+                    run("record-sample", p["key"], "--failed", "--no-sleep")
+
+    def test_calls_prints_one_call(self):
+        self.plan()
+        r = run("calls", "groups")
+        self.assertEqual(r.stdout.count("## "), 1)
+        self.assertIn("one at a time", r.stdout)
+        r = run("next-call")
+        self.assertEqual(r.stdout.count("## "), 1)
+        self.assertIn("record S01=", r.stdout)
+        r = run("calls", "groups", "--all")
+        self.assertIn("REVIEW ONLY", r.stdout)
+
+    def test_429_sequence_and_skip(self):
+        self.plan()
+        r = run("record-error", "S01", "--kind", "429", "--reads-left-today", "899")
+        self.assertIn("WAIT 60s", r.stdout)
+        r = run("record-error", "S01", "--kind", "429")
+        self.assertIn("WAIT 120s", r.stdout)
+        r = run("record-error", "S01", "--kind", "429")
+        self.assertIn("GIVE UP", r.stdout)
+        rj = runjson()
+        self.assertIn("S01", rj["skipped"])
+        self.assertEqual((rj["log"]["retries_429"], rj["log"]["errors_other"], rj["log"]["extra_reads"]), (3, 0, 3))
+        self.assertNotIn("S01", run("next-call").stdout.split("\n")[0])
+        r = run("record-error", "S01", "--kind", "429")
+        self.assertNotEqual(r.returncode, 0)          # no 4th attempt on a skipped call
+
+    def test_other_errors_retry_once_and_stop_at_5(self):
+        self.plan()
+        r = run("record-error", "S01", "--kind", "other")
+        self.assertIn("RETRY", r.stdout)
+        r = run("record-error", "S01", "--kind", "other")
+        self.assertIn("GIVE UP", r.stdout)
+        for k in ("S02", "S03"):
+            run("record-error", k, "--kind", "other")
+        r = run("record-error", "S04", "--kind", "other")
+        self.assertIn("STOP: 5 non-429 errors", r.stdout)
+        self.assertIn("cannot build", r.stdout)
+        self.assertIn("STOPPED", run("next-call").stdout)
+
+    def test_429s_do_not_count_as_errors_but_reserve_stops(self):
+        self.plan()
+        keys = [g["key"] for g in runjson()["groups"]]
+        out = ""
+        for k in keys[:5]:
+            out = run("record-error", k, "--kind", "429").stdout
+            self.assertNotIn("STOP", out)
+            out = run("record-error", k, "--kind", "429").stdout
+        self.assertIn("STOP: retry reserve of 10 reads used up", out)
+
+    def test_budget_keeps_retry_reserve(self):
+        r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", "470")
+        self.assertEqual(runjson()["budget"], 60)    # 470 - 400 floor - 10 retry reserve
+        r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", "425")
+        self.assertEqual(r.returncode, 3)
+
+    def test_partial_build_and_refusal(self):
+        self.plan()
+        self.record_groups(skip=("S12",))
+        r = run("build")
+        self.assertNotEqual(r.returncode, 0)          # nothing picked yet
+        self.record_groups()
+        self.do_samples()
+        r = run("pick-candidates")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        picks = runjson()["picks"]["individual"]
+        core = [p["ticker"] for p in picks if p["source"] == "core"]
+        rest = [p["ticker"] for p in picks if p["source"] != "core"]
+        self.assertTrue(rest)
+        run("record", *["%s=%s" % (t, Z29) for t in core[:-1]], "--no-sleep")
+        r = run("build")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("core not fully counted", r.stderr)
+        run("record", "%s=%s" % (core[-1], Z29), "--no-sleep")
+        r = run("build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PARTIAL build", r.stdout)
+        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
+        self.assertTrue(out["partial"])
+        self.assertTrue(out["note"].startswith("PARTIAL RUN"))
+        self.assertIn(rest[0], out["partial_reason"])
+        self.assertIn(rest[0], out["planned_not_measured"])
+        self.assertEqual(out["ranked_count"], len(core))
+        # next plan archives the built run
+        self.plan()
+        arch = os.listdir(os.path.join(TMP, "work", "archive"))
+        self.assertTrue(any(a.endswith("-built") for a in arch))
+
+    def test_complete_build_not_partial(self):
+        self.plan()
+        self.record_groups()
+        self.do_samples()
+        run("pick-candidates")
+        picks = runjson()["picks"]["individual"]
+        run("record", *["%s=%s" % (p["ticker"], Z29) for p in picks], "--no-sleep")
+        r = run("build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
+        self.assertFalse(out["partial"])
+        self.assertIsNone(out["partial_reason"])
+
+    def test_abandon_archives(self):
+        self.plan()
+        os.makedirs(os.path.join(TMP, "work", "samples"), exist_ok=True)
+        r = run("abandon", "--reason", "test")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(TMP, "work", "run.json")))
+        arch = [a for a in os.listdir(os.path.join(TMP, "work", "archive")) if a.endswith("-abandoned")]
+        self.assertTrue(arch)
+        a = json.load(open(os.path.join(TMP, "work", "archive", arch[-1], "run.json")))
+        self.assertEqual(a["abandoned"]["reason"], "test")
 
 
 if __name__ == "__main__":

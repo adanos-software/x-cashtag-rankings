@@ -62,8 +62,11 @@ It is stored in [`data/universe.csv`](data/universe.csv) (10,898 symbols on 2026
 
 ### Read budget
 
-- About 95 X reads per run, 5 runs a day, so ~475 reads per UTC day. That stays inside a 600-reads-per-day cap shared with other jobs.
-- Runs are paced at ≤24 calls per clock minute.
+- About 95 planned X reads per run, plus a reserve of at most 10 retry reads (≤105 per run). 5 runs a day uses ≤525 reads per UTC day, inside a 600-reads-per-day cap shared with other jobs.
+- X calls are made strictly one at a time, with a ~4 s pause after each one (≤15 calls per minute; in practice ~4–6). A run takes about 30–40 minutes.
+- On HTTP 429 (rate limited), the same call is retried after 60 s, and once more after 120 s. A call that fails 3 times is skipped.
+- A run stops after 5 non-429 errors, or when the retry reserve is used up.
+- If a run ends early but the whole group sweep and all planned core counts are done, it is published with `"partial": true` and a `partial_reason`. Otherwise nothing is published.
 - If fewer reads are left, the script shrinks the core first, then ETF groups, spare, samples and candidates.
 - A run is skipped if fewer than ~20 reads fit.
 
@@ -102,7 +105,9 @@ Existing fields keep their meaning; everything else is additive. Excerpt (illust
   "measured_from": "…", "measured_until": "…",
   "planned_not_measured": [],
   "x_reads_used": 90,
-  "x_reads_breakdown": { "group_counts": 14, "samples": 6, "individual_counts": 70, "extra_errors_retries": 0 },
+  "x_reads_breakdown": { "group_counts": 14, "samples": 6, "individual_counts": 70, "extra_errors_retries": 0,
+                         "retries_429": 0, "errors_other": 0 },
+  "partial": false, "partial_reason": null,
   "x_reads_left_today": 628,
   "ranking_rule": "…", "risers_rule": "…",
   "group_sweep": { "stock_groups": 12, "stock_tickers_screened": 5378, "etf_groups_this_run": ["E01", "E02"],
@@ -134,6 +139,7 @@ Added fields:
 - **Run-level:**
   - `screened_count`: tickers covered by the group sweep this run.
   - `sources`, `x_reads_breakdown`, `ranking_rule`, `risers_rule`, `group_sweep`, `sampling` and `risers`.
+  - `partial` / `partial_reason`: `true` when a run ended early but published, because the full group sweep and all planned core counts were done. The missing tickers are in `planned_not_measured`, and the `note` starts with `PARTIAL RUN`.
 - **Per entry:**
   - `tier`: `core`, `carryover` or `discovered`.
   - `source`: `core`, `core-returned`, `carryover` or `discovered`.
@@ -153,17 +159,18 @@ curl -sL https://raw.githubusercontent.com/adanos-software/x-cashtag-rankings/ma
 
 ## Refreshing (maintainers)
 
-`scripts/build_rankings.py` (Python 3, stdlib only) does all selection logic. The operator only makes the X calls it prints and records the results:
+`scripts/build_rankings.py` (Python 3, stdlib only) does all selection logic. The operator makes **one X call at a time**, exactly as printed, and records each result (full procedure: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)):
 
 ```bash
-python3 scripts/build_rankings.py plan            # window, budget, groups      -> work/run.json
-python3 scripts/build_rankings.py calls groups    # exact tool arguments; then record each result:
-python3 scripts/build_rankings.py record S01=1471:364,344,...   # KEY=TOTAL:29 hourly buckets (oldest first)
-python3 scripts/build_rankings.py pick-samples    # stage 1 (hottest groups) -> calls samples -> record-sample
-python3 scripts/build_rankings.py pick-samples    # stage 2 (co-mentions)    -> calls samples -> record-sample
-python3 scripts/build_rankings.py pick-candidates # core + carryover + discovered -> calls counts -> record
-python3 scripts/build_rankings.py build           # data/latest.json, history, state, next_tickers
-python3 scripts/build_rankings.py next            # at any point: what to do next + budget
+python3 scripts/build_rankings.py plan            # window, budget, groups -> work/run.json
+python3 scripts/build_rankings.py next-call       # the ONE next X call (or the next script step: pick-samples,
+                                                  # pick-candidates, build)
+python3 scripts/build_rankings.py record S01=1471:364,344,...   # KEY=TOTAL:29 hourly buckets (oldest first); pauses 4 s
+python3 scripts/build_rankings.py record-sample smp-S07 --lines work/samples/smp-S07.txt
+python3 scripts/build_rankings.py record-error S05 --kind 429   # prints WAIT 60s / WAIT 120s / RETRY / GIVE UP / STOP
+python3 scripts/build_rankings.py build           # complete, or partial if group sweep + core are done
+python3 scripts/build_rankings.py abandon --reason "..."   # archive an unpublishable run (nothing published)
+python3 scripts/build_rankings.py next            # status: next step, budget, retries, skipped calls
 python3 scripts/build_rankings.py check           # offline self-checks; tests: python3 -m unittest discover tests
 ```
 
