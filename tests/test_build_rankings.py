@@ -121,6 +121,22 @@ class Metrics(unittest.TestCase):
         self.assertLess(m["adjusted"], m["mentions"])
         self.assertEqual(m["adjusted"], m["mentions"] - 374 + m["burst_cap"])
 
+    def test_spike_last_hour_needs_rise_vs_prev_9h(self):
+        # $TM 2026-10-10: quiet yesterday, ~80/h for 9h, last hour 40 -> above the burst cap, but fading
+        tm = [0] * 19 + [60, 90, 110, 95, 80, 85, 75, 70, 70, 40]
+        m = br.metrics(tm)
+        self.assertLess(m["momentum_1h"], 1)
+        self.assertFalse(m["spike_last_hour"])
+        rising = [2] * 28 + [60]
+        self.assertTrue(br.metrics(rising)["spike_last_hour"])
+
+    def test_last_hour_vs_same_hour_yesterday(self):
+        b = [5] * 29
+        b[4], b[-1] = 30, 40        # same hour yesterday was also busy (market open)
+        m = br.metrics(b)
+        self.assertEqual(m["last_hour_prev_day"], 30)
+        self.assertAlmostEqual(m["momentum_1h_vs_prev_day"], round(41 / 31, 2))
+
     def test_flat_has_no_flags(self):
         m = br.metrics(NVDA_FLAT)
         self.assertEqual((m["burst_idx"], m["spike_last_hour"], m["mentions"]), ([], False, 343))
@@ -141,9 +157,14 @@ class Records(unittest.TestCase):
 
     def test_queries(self):
         coll = br.collisions()
-        self.assertEqual(br.ticker_query("NVDA", coll), "$NVDA -is:retweet")
+        # the spam suffix goes on EVERY individual count, not only on collision tickers
+        self.assertEqual(br.ticker_query("NVDA", coll), "$NVDA " + br.suffix())
+        self.assertEqual(br.ticker_query("TM", coll), "$TM " + br.suffix() + " " + coll["TM"])
+        for term in ("-whatsapp", "-telegram", '-"stock analyst"', '-"hot stocks"', '-"discussion group"',
+                     '-"Ms. Victoria"', '-"investment advisor"', '-"join for free"', "-challenge", "-signals"):
+            self.assertIn(term, br.suffix())
         q = br.ticker_query("GM", coll)
-        self.assertTrue(q.startswith("$GM -is:retweet -vote"))
+        self.assertTrue(q.startswith("$GM " + br.suffix()))
         self.assertIn('-"listing id"', q)
         for t in ("GM", "AI", "U", "STX", "SKY", "PUMP", "S", "W", "SI", "SM"):
             self.assertIn(t, coll)
@@ -164,10 +185,33 @@ class Samples(unittest.TestCase):
         agg, st = br.analyze_samples(run_obj)
         self.assertEqual(len(agg["IPW"]["authors"]), 2)
         self.assertEqual(len(agg["DKI"]["authors"]), 2)
-        self.assertNotIn("MI", agg)
-        self.assertNotIn("GM", agg)
+        self.assertEqual(agg["MI"]["authors"], set())      # spam account: seen, but no clean author
+        self.assertEqual(agg["GM"]["authors"], set())
+        self.assertEqual((agg["GM"]["total"], agg["GM"]["share"]), (4, 0.0))
         s = st["smp-X"]
-        self.assertEqual((s["spam_account"], s["list_spam"], s["template"], s["kept"]), (1, 1, 4, 3))
+        self.assertEqual((s["spam_account"], s["dump"], s["template"], s["kept"]), (1, 1, 4, 3))
+
+    def test_ticker_dump_rule(self):
+        cls = lambda text: br.classify_post(text, "x", set(), set(), br.term_patterns())[0]
+        self.assertEqual(cls("$NVDA $AMD $TSLA $AAPL #FinTwit #AI https://t.co/x"), "dump")
+        self.assertEqual(cls("Have a phenomenal weekend bulls !! $ZYBT $WBUY $WFF $YMAT $NCPL"), "dump")
+        self.assertEqual(cls("Top Gainers $WFF $JZ $ZYBT $VEEA $QETA"), "dump")
+        # 4 cashtags but real context around them -> clean
+        self.assertEqual(cls("Has anyone else looked under the hood of their portfolio lately? 4 of 9 stocks "
+                             "carry my returns $AMD $NVDA $NBIS $PLTR"), "clean")
+        self.assertEqual(cls("$PLTR closed my option position here off this monster move"), "clean")
+        # filter terms as whole words: -ca / -tg must not hit 'can' / 'tgt'
+        self.assertEqual(cls("$TGT can still run, cash flow looks fine"), "clean")
+        self.assertEqual(cls("I'm your stock analyst! send me your WhatsApp number $TM"), "spam_term")
+        self.assertEqual(cls("185x up from my call on $TM https://t.co/x"), "spam_term")
+        self.assertEqual(cls("Reply \"Hot Stocks\" to join $TM $AAPL"), "spam_term")
+
+    def test_clean_gate(self):
+        ok = {"authors": {"a", "b", "c"}, "posts": 3, "total": 4, "share": 0.75}
+        self.assertTrue(br.clean_ok(ok))
+        self.assertFalse(br.clean_ok({**ok, "authors": {"a", "b"}}))            # < 3 distinct clean authors
+        self.assertFalse(br.clean_ok({"authors": {"a", "b", "c"}, "posts": 3, "total": 25, "share": 0.12}))
+        self.assertTrue(br.clean_ok({"authors": {"a", "b", "c"}, "posts": 3, "total": 3, "share": 1.0}))
 
     def test_parse_sample_json(self):
         obj = {"data": [{"author_id": "1", "text": "$IPW go"}], "includes": {"users": [{"id": "1", "username": "bob"}]}}
@@ -318,6 +362,47 @@ class RunFlow(unittest.TestCase):
         out = json.load(open(os.path.join(TMP, "data", "latest.json")))
         self.assertFalse(out["partial"])
         self.assertIsNone(out["partial_reason"])
+
+    def test_clean_gate_in_flow(self):
+        """TM-style memecoin/template chatter is not discovered; a real mover with clean posts is;
+        a carryover ticker whose sample is spam is held back instead of ranked."""
+        st = json.load(open(os.path.join(TMP, "data", "state.json")))
+        st["last_run_noncore"] = [{"ticker": "DKI", "mentions": 300, "window_end": "2026-10-09T04:00:00Z",
+                                   "riser": True, "clean_checked_at": "2026-10-09T04:00:00Z"}]
+        json.dump(st, open(os.path.join(TMP, "data", "state.json"), "w"))
+        self.plan()
+        self.record_groups()
+        run("pick-samples")
+        lines = os.path.join(TMP, "lines.txt")
+        posts = ["memeguru%d\t%dx profit from my call on $TM https://t.co/x" % (i, 20 + i) for i in range(6)]
+        posts += ["solmaster%d\tDecent %dx profit pump up on $TM private TG friends printing" % (i, i) for i in range(4)]
+        posts += ["trader0\t$IPW breaking out on volume after the contract news",
+                  "trader1\tadded some $IPW here, the chart finally cleared resistance today",
+                  "trader2\t$IPW premarket looks strong, curious whether it holds the open",
+                  "trader3\tnot chasing $IPW at these levels but the story is real"]
+        posts += ["dumper%d\t$DKI $AAA $BBB $CCC top gainers" % i for i in range(5)]
+        open(lines, "w").write("\n".join(posts) + "\n")
+        for p in runjson()["picks"]["samples1"]:
+            run("record-sample", p["key"], "--lines", lines, "--no-sleep")
+        run("pick-samples")
+        for p in runjson()["picks"]["samples2"] or []:
+            run("record-sample", p["key"], "--failed", "--no-sleep")
+        r = run("pick-candidates")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        picks = {p["ticker"]: p for p in runjson()["picks"]["individual"]}
+        self.assertNotIn("TM", picks)
+        self.assertEqual(picks["IPW"]["source"], "discovered")
+        self.assertEqual(picks["DKI"]["source"], "carryover")
+        self.assertTrue(picks["IPW"]["query"].endswith(br.suffix()))
+        run("record", *["%s=%s" % (t, Z29) for t in picks], "--no-sleep")
+        r = run("build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
+        ranked = {e["ticker"] for e in out["rankings"]}
+        self.assertIn("IPW", ranked)
+        self.assertNotIn("DKI", ranked)
+        self.assertEqual([h["ticker"] for h in out["held_back"]], ["DKI"])
+        self.assertIn("TM", out["sampling"]["rejected_by_clean_check"])
 
     def test_abandon_archives(self):
         self.plan()

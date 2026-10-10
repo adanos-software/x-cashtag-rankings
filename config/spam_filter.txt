@@ -1,20 +1,58 @@
-# Spam filter terms appended (after "-is:retweet") to every GROUP count query, every
-# SAMPLE query and every COLLISION ticker's individual count query.
+# Spam filter terms appended (after "-is:retweet") to EVERY X query of a run: every group
+# count, every individual count (core, candidate, carryover) and every sample.
 # One X search term per line, exactly as it goes into the query; '#' starts a comment.
-# Measured 2026-10-08: on a 457-stock group this suffix removed ~52% of the posts
-# (vote/listing templates, memecoin shills); on $NVDA/$TSLA/$MU/$SPY it removed ~10%.
-# Every extra term makes the group queries longer (fewer tickers per 4096-char group ->
-# possibly one more group = one more read per run). Keep it short.
+# The same terms are matched (whole words / phrases) against sampled posts.
+#
+# Built 2026-10-10 from an audit of the Oct 9/10 rankings (samples in the commit message /
+# README). Measured on 2026-10-10 09-14 UTC, published (unfiltered) -> filtered count:
+#   NVDA 650->530, TSLA 425->302, AAPL 149->98, PLTR 252->223, GME 180->140, SPY 295->221,
+#   ASTS 388->361, IREN 240->182, SPCX 432->372 (old suffix), TM 338->49.
+# What the big-cap cut removes is mostly spam: a relevancy sample of the removed NVDA posts
+# was 25/25 the "US Stock Market WhatsApp Group" template; a recency sample of NVDA/TSLA/AAPL
+# posts hit by the NEW terms was ~21/25 spam (free signals groups, token launches "CA: 0x..",
+# MEXC reply shills) and ~3-4/25 legitimate (e.g. "Token Factory", "bullish signals").
+# Every extra term makes the group queries longer (fewer tickers per 4096-char group).
+#
+# WhatsApp / Telegram pump groups and scam templates
+-whatsapp
+-telegram
+-tg
+-"stock analyst"
+-"hot stocks"
+-"discussion group"
+-"investment advisor"
+-"join for free"
+-"exclusive group"
+-"Ms. Victoria"
+-"follow him"
+-"dm me"
+-"dm for"
+-"private channel"
+-"copy trade"
+-challenge          # "$5K -> $300K Challenge"; also MEXC "the real challenge" reply shills
+-signals            # "join our free signals group"
+-mexc               # MEXC RealStocks reply-shill campaign
+-"my go to"         # reply shills "You and @X are my go to finance accounts"
+# vote / listing templates
 -vote
 -leaderboard
--"stock analyst"
--whatsapp
+-coinmarketcap
+-"listing id"
+# crypto / memecoin calls ("20x from my call on $TM", "CA: ...pump", "MC $548K")
 -airdrop
 -memecoin
+-memecoins
 -solana
+-pumpswap
 -dexscreener
 -gmgn
+-"pump.fun"
 -mcap
+-marketcap
+-mc
+-ca
+-"my call"
+-cabal
 -token
 -crypto
--"pump.fun"
+-bnb

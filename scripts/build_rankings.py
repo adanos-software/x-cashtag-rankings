@@ -73,14 +73,22 @@ RETRY_RESERVE = 10           # extra reads per run for retries (429 / errors), o
 MAX_OTHER_ERRORS = 5         # stop the run after this many non-429 errors
 PACE_SECONDS = 4             # record commands pause this long, so calls stay strictly sequential (<= ~15/min)
 WAIT_429 = (60, 120)         # wait before the 1st and the 2nd (last) retry of a call that got HTTP 429
-MIN_AUTHORS = 2              # a sampled ticker needs >= 2 distinct (non-spam) authors to be a candidate
-MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are list spam -> ignored for discovery
+MIN_AUTHORS = 3              # a sampled ticker needs >= 3 distinct authors of CLEAN posts to be a candidate
+MIN_CLEAN_SHARE = 0.3        # ... and >= 30% of the sampled posts mentioning it must be clean
+CLEAN_SHARE_MIN_POSTS = 5    # a clean share is only reported/used with >= 5 sampled posts mentioning the ticker
+LOW_CLEAN_SHARE = 0.3        # core entries below this get the label "low-clean-share" (rank unchanged)
+CLEAN_CHECK_MAX_AGE_HOURS = 24   # a carryover ticker's last passed clean check may be at most this old
+MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are always a ticker dump
+DUMP_MIN_CASHTAGS = 4        # posts with >= 4 cashtags ...
+DUMP_MIN_WORDS = 8           # ... and fewer than 8 real words (cashtags, links, @, #, emoji, numbers removed) are dumps
 TEMPLATE_MIN_AUTHORS = 3     # same normalized text from >= 3 authors -> template spam
 BURST_FACTOR = 6             # an hour > 6 x max(median of 29h, 3) is a burst
 BURST_MIN_MEDIAN = 3
 BURST_DECAY = 3              # ... and the following hour is < spike / 3 (it collapsed)
 RISER_MIN_MENTIONS = 20
 RISER_MIN_RATIO = 3.0        # momentum (smoothed ratio) needed to be a riser
+RISER_MIN_1H_VS_PREV_DAY = 2.0   # a riser via the last-hour ratio also needs last hour >= 2x the same hour yesterday
+SPIKE_MIN_RATIO = 2.0        # spike-last-hour needs last hour >= 2x the previous 9h average (smoothed)
 BASE_QUERY = "$TICKER -is:retweet"
 CASHTAG_RE = re.compile(r"^[A-Z]{1,6}$")
 TEXT_CASHTAG_RE = re.compile(r"(?<![A-Za-z0-9_$])\$([A-Za-z]{1,6})(?![A-Za-z0-9_])")
@@ -177,10 +185,10 @@ def group_query(tickers):
 
 
 def ticker_query(t, coll=None):
+    """Individual count query: the shared spam suffix is applied to EVERY ticker (core, candidate,
+    carryover); collision tickers additionally get their per-ticker terms."""
     coll = collisions() if coll is None else coll
-    if t in coll:
-        return " ".join(x for x in ["$" + t, suffix(), coll[t]] if x)
-    return BASE_QUERY.replace("TICKER", t)
+    return " ".join(x for x in ["$" + t, suffix(), coll.get(t, "")] if x)
 
 
 def sample_ticker_query(t, coll=None):
@@ -224,13 +232,17 @@ def metrics(b):
     # around it). Only bursts inside the window are down-weighted (hour capped at cap).
     # A spike in the LAST hour cannot be judged yet: it is labelled, not down-weighted,
     # so a genuine breakout (e.g. a premarket gainer) is not penalised.
+    # spike-last-hour additionally needs the last hour to be well above the hours just before it
+    # (>= SPIKE_MIN_RATIO x the previous 9h average): a high level that is already fading is no spike
+    # (bug fixed 2026-10-10: $TM got the label with 40 in the last hour vs a 9h average of 81.7).
     burst_idx, spike_last = [], False
     for i in range(n - WINDOW_HOURS, n):
         if b[i] > cap:
             if i == n - 1:
-                spike_last = True
+                spike_last = (last + 1) >= SPIKE_MIN_RATIO * (prev9 + 1)
             elif b[i + 1] * BURST_DECAY < b[i]:
                 burst_idx.append(i)
+    yl = b[n - 25] if n >= 25 else None
     adjusted = sum(min(b[i], cap) if i in burst_idx else b[i] for i in range(n - WINDOW_HOURS, n))
     return {
         "mentions": m5,
@@ -239,6 +251,8 @@ def metrics(b):
         "last_hour": last,
         "prev_9h_avg": round(prev9, 1),
         "momentum_1h": round((last + 1) / (prev9 + 1), 2),
+        "last_hour_prev_day": yl,
+        "momentum_1h_vs_prev_day": round((last + 1) / (yl + 1), 2) if yl is not None else None,
         "median_29h": med,
         "burst_cap": cap,
         "burst_idx": burst_idx,
@@ -732,12 +746,69 @@ def norm_text(text):
     return t[:60]
 
 
+CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+
+
+def real_words(text):
+    """Words of real text: cashtags, links, @mentions, #hashtags, numbers and emoji removed.
+    CJK/Hangul characters count as half a word each (no spaces between words)."""
+    t = re.sub(r"https?://\S+", " ", text)
+    t = TEXT_CASHTAG_RE.sub(" ", t)
+    t = re.sub(r"[@#]\w+", " ", t)
+    cjk = len(CJK_RE.findall(t))
+    t = CJK_RE.sub(" ", t)
+    words = [w for w in re.findall(r"[^\W\d_]{2,}", t)]
+    return len(words) + cjk // 2
+
+
+def term_patterns(terms=None):
+    """Spam-filter terms as word-boundary regexes for local post classification (X matches whole
+    tokens too, so -ca must not hit 'can' and -tg must not hit 'tgt')."""
+    terms = spam_terms() if terms is None else terms
+    out = []
+    for t in terms:
+        if not t.startswith("-") or t.startswith("-is:"):
+            continue
+        w = t[1:].strip('"').lower()
+        if not w:
+            continue
+        words = [re.escape(x) for x in re.findall(r"[\w.]+", w)]
+        if words:
+            out.append(re.compile(r"(?<![\w$])" + r"\W+".join(words) + r"(?![\w])"))
+    return out
+
+
+def classify_post(text, author, bad_accounts, templates, patterns):
+    """-> (class, cashtags). Classes: spam_account, template, dump, spam_term, clean."""
+    tags = []
+    for t in TEXT_CASHTAG_RE.findall(text):
+        t = t.upper()
+        if t not in tags:
+            tags.append(t)
+    if author.lower() in bad_accounts:
+        return "spam_account", tags
+    if norm_text(text) in templates:
+        return "template", tags
+    if len(tags) > MAX_CASHTAGS_PER_POST or (len(tags) >= DUMP_MIN_CASHTAGS and real_words(text) < DUMP_MIN_WORDS):
+        return "dump", tags
+    low = text.lower()
+    if any(rx.search(low) for rx in patterns):
+        return "spam_term", tags
+    return "clean", tags
+
+
+def clean_ok(a):
+    """Sample evidence that a non-core ticker is real stock chatter."""
+    return len(a["authors"]) >= MIN_AUTHORS and (a["total"] < CLEAN_SHARE_MIN_POSTS or a["share"] >= MIN_CLEAN_SHARE)
+
+
 def analyze_samples(run, keys=None):
-    """Aggregate kept sample posts -> {ticker: {authors:set, posts:int, via:set}} + per-sample stats."""
+    """Per ticker over all samples of the run: {authors: set of authors of CLEAN posts, posts: clean posts,
+    total: all sampled posts mentioning it, share: clean/total, via: sample keys} + per-sample stats."""
     universe = load_universe()
     exclude = set(read_list("exclude_tickers.txt"))
     bad_accounts = spam_accounts()
-    terms = [t[1:].strip('"').lower() for t in spam_terms() if t.startswith("-")]
+    patterns = term_patterns()
     posts = []
     for key, s in run["samples"].items():
         if keys is not None and key not in keys:
@@ -754,36 +825,24 @@ def analyze_samples(run, keys=None):
     agg, stats = {}, {}
     for key, p in posts:
         st = stats.setdefault(key, {"posts": 0, "kept": 0, "spam_account": 0, "template": 0,
-                                    "list_spam": 0, "spam_term": 0})
+                                    "dump": 0, "spam_term": 0})
         st["posts"] += 1
-        author = p["author"].lower()
-        text = p["text"]
-        tags = []
-        for t in TEXT_CASHTAG_RE.findall(text):
-            t = t.upper()
-            if t not in tags:
-                tags.append(t)
-        if author in bad_accounts:
-            st["spam_account"] += 1
-            continue
-        if norm_text(text) in templates:
-            st["template"] += 1
-            continue
-        if len(tags) > MAX_CASHTAGS_PER_POST:
-            st["list_spam"] += 1
-            continue
-        low = text.lower()
-        if any(term and term in low for term in terms):
-            st["spam_term"] += 1
-            continue
-        st["kept"] += 1
+        cls, tags = classify_post(p["text"], p["author"], bad_accounts, templates, patterns)
+        if cls == "clean":
+            st["kept"] += 1
+        else:
+            st[cls] += 1
         for t in tags:
             if t in exclude or t not in universe:
                 continue
-            a = agg.setdefault(t, {"authors": set(), "posts": 0, "via": set()})
-            a["authors"].add(author)
-            a["posts"] += 1
-            a["via"].add(key)
+            a = agg.setdefault(t, {"authors": set(), "posts": 0, "total": 0, "via": set()})
+            a["total"] += 1
+            if cls == "clean":
+                a["authors"].add(p["author"].lower())
+                a["posts"] += 1
+                a["via"].add(key)
+    for a in agg.values():
+        a["share"] = round(a["posts"] / a["total"], 2) if a["total"] else 0.0
     return agg, stats
 
 
@@ -814,8 +873,14 @@ def cmd_pick_samples(args):
         core_ind = set(run["core_individual_planned"])
         ranked = sorted(((t, a) for t, a in agg.items() if t not in core_ind),
                         key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
-        chosen = [t for t, a in ranked if len(a["authors"]) >= MIN_AUTHORS][:n]
-        for r in load_state()["risers"]:
+        chosen = [t for t, a in ranked if clean_ok(a)][:n]
+        st = load_state()
+        end = parse_iso(run["window_end"])
+        # then last run's risers / strong non-core tickers, those without a fresh clean check first
+        # (a carryover ticker is only counted again if it passed a clean check <= 24h ago)
+        prev = [r for r in st.get("last_run_noncore", []) if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS]
+        prev.sort(key=lambda r: (clean_check_fresh(r, end), not r.get("riser"), -r["mentions"]))
+        for r in prev + st["risers"]:
             if len(chosen) >= n:
                 break
             if r["ticker"] not in chosen and r["ticker"] not in core_ind:
@@ -923,6 +988,11 @@ def cmd_abandon(args):
 
 
 # --- candidates --------------------------------------------------------------
+def clean_check_fresh(r, end):
+    c = r.get("clean_checked_at")
+    return bool(c) and parse_iso(c) >= end - timedelta(hours=CLEAN_CHECK_MAX_AGE_HOURS)
+
+
 def cmd_pick_candidates(args):
     run = load_run()
     note_reads_left(run, args.reads_left_today)
@@ -946,12 +1016,14 @@ def cmd_pick_candidates(args):
             continue
         if parse_iso(r["window_end"]) < end - timedelta(hours=CARRYOVER_MAX_AGE_HOURS):
             continue
+        if not clean_check_fresh(r, end):
+            continue   # no recent sample evidence of clean stock chatter -> must be re-discovered
         if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS:
             carry.append((-(1 if r.get("riser") else 0), -r["mentions"], t))
     carry = [t for *_, t in sorted(carry)][:CARRYOVER_MAX]
     agg, _ = analyze_samples(run)
     disc = sorted(((t, a) for t, a in agg.items()
-                   if t not in core_ind and t not in carry and len(a["authors"]) >= MIN_AUTHORS),
+                   if t not in core_ind and t not in carry and clean_ok(a)),
                   key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
     pool = [(t, "carryover", None) for t in carry] + \
            [(t, "core" if t in core else "discovered", sorted(a["via"])) for t, a in disc]
@@ -995,7 +1067,14 @@ def cmd_pick_candidates(args):
     for p in picks:
         by[p["source"]] = by.get(p["source"], 0) + 1
     print("individual counts: %d %s (remaining budget %d, spare %d)" % (len(picks), json.dumps(by), rem, spare))
-    print("discovered:", ", ".join("%s(%d)" % (t, len(a["authors"])) for t, a in disc[:30]) or "-")
+    print("discovered (clean authors, clean share):",
+          ", ".join("%s(%d, %.0f%%)" % (t, len(a["authors"]), 100 * a["share"]) for t, a in disc[:30]) or "-")
+    rejected = sorted(((t, a) for t, a in agg.items() if t not in core_ind and t not in carry and not clean_ok(a)
+                       and a["total"] >= MIN_AUTHORS), key=lambda x: -x[1]["total"])
+    if rejected:
+        print("rejected by the clean check:", ", ".join("%s(%d posts, %.0f%% clean, %d authors)"
+                                                       % (t, a["total"], 100 * a["share"], len(a["authors"]))
+                                                       for t, a in rejected[:15]))
     print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
 
 
@@ -1093,6 +1172,8 @@ def cmd_build(args):
             "mentions_last_hour": m["last_hour"],
             "prev_9h_avg_per_hour": m["prev_9h_avg"],
             "momentum_last_hour_vs_prev_9h": m["momentum_1h"],
+            "mentions_last_hour_prev_day": m["last_hour_prev_day"],
+            "_m1_prev_day": m["momentum_1h_vs_prev_day"],
             "burst": bool(m["burst_idx"]),
             "burst_hours": [hour_iso(run, i) for i in m["burst_idx"]],
             "rank_score": m["adjusted"],
@@ -1102,12 +1183,37 @@ def cmd_build(args):
             e["query"] = p["query"]
         if p.get("via"):
             e["discovered_via"] = p["via"]
-        if t in agg:
-            e["sample_authors"] = len(agg[t]["authors"])
+        a = agg.get(t)
+        if a:
+            e["sample_authors"] = len(a["authors"])
+            e["sample_posts"] = a["total"]
+            if a["total"] >= CLEAN_SHARE_MIN_POSTS:
+                e["sample_clean_share"] = a["share"]
+                if p["tier"] == "core" and a["share"] < LOW_CLEAN_SHARE:
+                    labels.append("low-clean-share")
+        # clean gate for non-core tickers (discovered passed it when picked; carryover is re-checked
+        # against this run's samples when they mention it, otherwise its last passed check is carried)
+        if p["tier"] != "core":
+            prev = state.get("clean_checks", {}).get(t)
+            if a and a["total"] >= CLEAN_SHARE_MIN_POSTS and not clean_ok(a):
+                e["_held"] = "sample: %d posts, %.0f%% clean, %d clean authors" % (a["total"], 100 * a["share"],
+                                                                                 len(a["authors"]))
+            elif a and clean_ok(a):
+                e["_clean_checked_at"] = run["window_end"]
+            elif prev and parse_iso(prev) >= parse_iso(run["window_end"]) - timedelta(hours=CLEAN_CHECK_MAX_AGE_HOURS):
+                e["_clean_checked_at"] = prev
+                labels.append("clean-check-carried")
+            else:
+                e["_held"] = "no sample evidence of clean posts from %d+ authors" % MIN_AUTHORS
         entries.append(e)
+    held = [e for e in entries if "_held" in e]
+    entries = [e for e in entries if "_held" not in e]
     # risers
     for e in entries:
-        ratio = max(e["momentum_5h_vs_prev_day"] or 0, e["momentum_last_hour_vs_prev_9h"] or 0)
+        m1 = e["momentum_last_hour_vs_prev_9h"] or 0
+        if (e.get("_m1_prev_day") or 0) < RISER_MIN_1H_VS_PREV_DAY:
+            m1 = 0   # last hour high only vs the night/pre-open hours, not vs the same hour yesterday
+        ratio = max(e["momentum_5h_vs_prev_day"] or 0, m1)
         if e["rank_score"] >= RISER_MIN_MENTIONS and ratio >= RISER_MIN_RATIO:
             e["labels"].append("riser")
             e["_riser_score"] = round(e["rank_score"] * math.log2(ratio), 1)
@@ -1161,7 +1267,7 @@ def cmd_build(args):
         "source": {
             "platform": "X",
             "endpoint": "GET /2/tweets/counts/recent",
-            "query_pattern": BASE_QUERY,
+            "query_pattern": "$TICKER " + coll_terms,
             "collision_query_pattern": "$TICKER " + coll_terms + " <per-ticker terms from config/collisions.txt>",
             "granularity": "hour",
             "history_hours": HISTORY_HOURS,
@@ -1211,12 +1317,33 @@ def cmd_build(args):
                          **sstats.get(k, {"posts": 0})}
                         for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or [])
                         for k in [p["key"]] if k in run["samples"]],
-            "min_distinct_authors": MIN_AUTHORS,
-            "candidates_found": sorted(t for t, a in agg.items() if len(a["authors"]) >= MIN_AUTHORS),
+            "min_distinct_clean_authors": MIN_AUTHORS,
+            "min_clean_share": MIN_CLEAN_SHARE,
+            "candidates_found": sorted(t for t, a in agg.items() if clean_ok(a)),
+            "rejected_by_clean_check": sorted(t for t, a in agg.items() if not clean_ok(a) and a["total"] >= MIN_AUTHORS),
         },
-        "risers_rule": ("rank_score >= %d and max(momentum_5h_vs_prev_day, momentum_last_hour_vs_prev_9h) >= %.1f; "
-                        "momentum = (now+1)/(baseline+1)" % (RISER_MIN_MENTIONS, RISER_MIN_RATIO)),
+        "risers_rule": ("rank_score >= %d and max(momentum_5h_vs_prev_day, momentum_last_hour_vs_prev_9h) >= %.1f, "
+                        "where the last-hour ratio only counts if the last hour is also >= %.0fx the same hour "
+                        "yesterday; momentum = (now+1)/(baseline+1)"
+                        % (RISER_MIN_MENTIONS, RISER_MIN_RATIO, RISER_MIN_1H_VS_PREV_DAY)),
         "risers": risers_out,
+        "spam_handling": {
+            "filter": "every X query (group sweep, every individual count, every sample) carries the spam suffix",
+            "suffix_chars": len(suffix()),
+            "post_rules": ("sampled posts are dropped for discovery if the author is in config/spam_accounts.txt, "
+                           "the text is a template (same text from >= %d authors), a ticker dump (> %d cashtags, "
+                           "or >= %d cashtags with < %d real words), or contains a filter term"
+                           % (TEMPLATE_MIN_AUTHORS, MAX_CASHTAGS_PER_POST, DUMP_MIN_CASHTAGS, DUMP_MIN_WORDS)),
+            "clean_gate": ("a discovered or carryover ticker is only ranked if a sample of this run (or a passed "
+                           "check <= %dh old) shows clean posts from >= %d distinct authors and, with >= %d sampled "
+                           "posts, a clean share >= %.0f%%; others are listed in held_back with their count"
+                           % (CLEAN_CHECK_MAX_AGE_HOURS, MIN_AUTHORS, CLEAN_SHARE_MIN_POSTS, 100 * MIN_CLEAN_SHARE)),
+            "sample_clean_share": ("sample_clean_share = clean / all sampled posts mentioning the ticker (relevancy "
+                                   "samples, small n); informational, the rank stays the exact filtered count; core "
+                                   "entries below %.0f%% get the label low-clean-share" % (100 * LOW_CLEAN_SHARE)),
+        },
+        "held_back": [{"ticker": e["ticker"], "mentions": e["mentions"], "tier": e["tier"], "source": e["source"],
+                       "reason": e["_held"]} for e in sorted(held, key=lambda e: -e["mentions"])],
         "universe_source": {
             "repo": umeta.get("source_repo", FTD_REPO),
             "file": umeta.get("source_file", FTD_FILE),
@@ -1246,8 +1373,17 @@ def cmd_build(args):
     state["risers"] = [{"ticker": r["ticker"], "mentions": r["mentions"], "window_end": run["window_end"]}
                        for r in risers_out]
     state["last_run_noncore"] = [{"ticker": e["ticker"], "mentions": e["mentions"], "window_end": run["window_end"],
-                                  "riser": "riser" in e["labels"]}
+                                  "riser": "riser" in e["labels"], "clean_checked_at": e.get("_clean_checked_at")}
                                  for e in entries if e["tier"] != "core"]
+    cc = state.setdefault("clean_checks", {})
+    for e in entries:
+        if e.get("_clean_checked_at"):
+            cc[e["ticker"]] = e["_clean_checked_at"]
+    for t, a in agg.items():
+        if clean_ok(a):
+            cc[t] = run["window_end"]
+    cut = parse_iso(run["window_end"]) - timedelta(hours=CLEAN_CHECK_MAX_AGE_HOURS)
+    state["clean_checks"] = {t: v for t, v in sorted(cc.items()) if parse_iso(v) >= cut}
     if etf_groups and run["etf_groups_total"]:
         last = int(etf_groups[-1]["key"][1:]) - 1
         state["etf_rotation_next"] = (last + 1) % run["etf_groups_total"]
@@ -1268,7 +1404,7 @@ def cmd_build(args):
 def write_next(state, now):
     core = core_priority(state)
     carry = [r["ticker"] for r in state.get("last_run_noncore", [])
-             if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS][:CARRYOVER_MAX]
+             if (r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS) and r.get("clean_checked_at")][:CARRYOVER_MAX]
     write_json(NEXT_JSON, {
         "generated_at": iso(now),
         "method": METHOD,

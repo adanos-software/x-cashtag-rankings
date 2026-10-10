@@ -101,8 +101,9 @@ For an X call:
      If needed, Read `work/run.json` and copy `groups[i].query`.
    - Formats:
      - groups: `{"query": "($A OR $AA OR ...) -is:retweet -vote ... -\"pump.fun\"", "granularity": "hour", "start_time": "<window_end-29h>", "end_time": "<window_end>"}`
-     - tickers: `{"query": "$NVDA -is:retweet", ...same...}`
-     - collision tickers: the longer printed query, e.g. `$GM -is:retweet -vote ... -coinmarketcap -"listing id" -bnb -wallet`
+     - tickers: `{"query": "$NVDA -is:retweet -whatsapp -telegram ... -bnb", ...same...}`: EVERY ticker carries the full spam
+       suffix (~450 characters). Copy the printed query verbatim; never shorten it to `$NVDA -is:retweet`.
+     - collision tickers: the suffix plus per-ticker terms, e.g. `$TM -is:retweet -whatsapp ... -bnb -telemoney -"telegram money" -sats`
      - samples (`search_posts_all`): `{"query": ..., "sort_order": "relevancy", "max_results": 25, "start_time": <window_start>, "end_time": <window_end>, "post.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"}`
 2. **Record the result** (this pauses 4 s):
    - **Count:** `data` has 29 hourly buckets (oldest first) and `meta.total_tweet_count`:
@@ -110,8 +111,9 @@ For an X call:
      python3 scripts/build_rankings.py record S01=8571:364,344,...,316 --reads-left-today <B>
      ```
      The script rejects a list that is not 29 long or doesn't add up to TOTAL. Fix the transcription; don't call X again.
-   - **Sample:** one line per post, `username | text`. Take the username from `includes.users` by `author_id`. You may shorten the
-     text, but keep every `$CASHTAG` and roughly the first 100 characters.
+   - **Sample:** one line per post, `username | text`. Take the username from `includes.users` by `author_id`. Keep the **full
+     text** on one line (replace line breaks with spaces); do not shorten it: the ticker-dump rule counts the real words around
+     the cashtags, and the template rule compares texts across authors. Every post of the result goes in, spam included.
      ```bash
      mkdir -p work/samples
      cat > work/samples/smp-S07.txt <<'TXT'
@@ -172,6 +174,8 @@ git push origin main
 - X reads used (`x_reads_breakdown`, incl. 429 retries and other errors) and the last B
 - top 5 by mentions, and the top 5 risers
 - burst / spike-last-hour / collision notes, skipped calls, planned_not_measured
+- `held_back` tickers and `sampling.rejected_by_clean_check` (non-core tickers kept out by the clean check), and any core entry
+  with `low-clean-share`
 
 ## What counts as a failure (report it, don't work around it)
 - gh not authenticated, no push access, or the push is refused other than non-fast-forward
@@ -186,10 +190,15 @@ git push origin main
 - Constants are at the top of `scripts/build_rankings.py`:
   - `RUN_READS=95`, `RETRY_RESERVE=10`, `MAX_OTHER_ERRORS=5`, `PACE_SECONDS=4`, `WAIT_429=(60, 120)`
   - `ETF_GROUPS_PER_RUN=2`, `SAMPLE_GROUPS=3`, `COMENTION_SAMPLES=3`, `CANDIDATES=20`, `CORE_INDIVIDUAL=50`, `SPARE=5`
-  - `MIN_AUTHORS=2`, `BURST_FACTOR=6`, `BURST_DECAY=3`, `RISER_MIN_MENTIONS=20`, `RISER_MIN_RATIO=3`
+  - `MIN_AUTHORS=3` (distinct authors of clean posts), `MIN_CLEAN_SHARE=0.3`, `DUMP_MIN_CASHTAGS=4`, `DUMP_MIN_WORDS=8`,
+    `CLEAN_CHECK_MAX_AGE_HOURS=24`, `SPIKE_MIN_RATIO=2`, `RISER_MIN_1H_VS_PREV_DAY=2`, `BURST_FACTOR=6`, `BURST_DECAY=3`, `RISER_MIN_MENTIONS=20`, `RISER_MIN_RATIO=3`
   - `DAILY_CAP=600`, `MIN_RUN_READS=20`
 - Groups are packed by the script: every non-core stock plus the demoted core, OR'ed, ≤4096 characters including the spam
-  suffix (12 stock groups). 2 of 13 ETF groups rotate per run.
-- Ranking: exact 5h count. Collision tickers use their filtered count. Bursts that collapsed are capped in `rank_score`.
+  suffix (13 stock groups since the 2026-10-10 suffix). 2 of 13 ETF groups rotate per run.
+- Spam: `config/spam_filter.txt` goes on every query (groups, every individual count, samples). Sampled posts from
+  `config/spam_accounts.txt`, templates, ticker dumps (> 8 cashtags, or >= 4 with < 8 real words) and filter-term posts are not
+  clean. Non-core tickers are only ranked after a clean check (>= 3 clean authors, >= 30% clean); failures go to `held_back`.
+  Maintain the config lists only between runs, never mid-run; run `check` after editing.
+- Ranking: exact 5h filtered count. Collision tickers additionally use their per-ticker terms. Bursts that collapsed are capped in `rank_score`.
   `risers` is a separate list.
 - Change config only between runs. Run `check` and `python3 -m unittest discover tests` before committing such a change.
