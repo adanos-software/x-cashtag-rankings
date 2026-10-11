@@ -1,244 +1,102 @@
 {
-  "generated_at": "2026-10-11T19:48:48Z",
-  "method": "group-sweep+sampling+counts",
-  "note": "Expected individual counts of the next run: core (strongest first; the weakest go into the group sweep) and carryover. Discovered tickers are only known during the run. Recomputed by `plan`/`pick-candidates` at run time.",
+  "generated_at": "2026-10-11T23:47:05Z",
+  "method": "group-sweep+adaptive-splits+sampling+daily-counts",
+  "note": "Expected individual counts of the next run: the megacaps (every run). Everything else, including the rest of the core, is screened in the group sweep and gets one exact daily count per UTC day (split leaves, sample discoveries, hot re-reads, core due today), chosen by `pick-candidates` at run time.",
   "query_pattern": "$TICKER -is:retweet",
-  "count": 58,
+  "count": 10,
   "tickers": [
     {
-      "ticker": "NVDA",
-      "tier": "core"
-    },
-    {
-      "ticker": "TSLA",
-      "tier": "core"
-    },
-    {
-      "ticker": "MU",
-      "tier": "core"
-    },
-    {
-      "ticker": "ASTS",
-      "tier": "core"
-    },
-    {
       "ticker": "SPY",
-      "tier": "core"
-    },
-    {
-      "ticker": "AMZN",
-      "tier": "core"
-    },
-    {
-      "ticker": "META",
-      "tier": "core"
+      "tier": "core",
+      "source": "megacap"
     },
     {
       "ticker": "QQQ",
-      "tier": "core"
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "PLTR",
-      "tier": "core"
+      "ticker": "NVDA",
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "TSM",
-      "tier": "core"
-    },
-    {
-      "ticker": "GME",
-      "tier": "core"
-    },
-    {
-      "ticker": "AMD",
-      "tier": "core"
-    },
-    {
-      "ticker": "HIMS",
-      "tier": "core"
-    },
-    {
-      "ticker": "SNDK",
-      "tier": "core"
-    },
-    {
-      "ticker": "NBIS",
-      "tier": "core"
-    },
-    {
-      "ticker": "MSFT",
-      "tier": "core"
-    },
-    {
-      "ticker": "JPM",
-      "tier": "core"
-    },
-    {
-      "ticker": "INTC",
-      "tier": "core"
-    },
-    {
-      "ticker": "GOOGL",
-      "tier": "core"
-    },
-    {
-      "ticker": "SOFI",
-      "tier": "core"
-    },
-    {
-      "ticker": "AVGO",
-      "tier": "core"
-    },
-    {
-      "ticker": "RKLB",
-      "tier": "core"
-    },
-    {
-      "ticker": "ASML",
-      "tier": "core"
+      "ticker": "TSLA",
+      "tier": "core",
+      "source": "megacap"
     },
     {
       "ticker": "AAPL",
-      "tier": "core"
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "MSTR",
-      "tier": "core"
+      "ticker": "MSFT",
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "NFLX",
-      "tier": "core"
+      "ticker": "AMZN",
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "GOOG",
-      "tier": "core"
+      "ticker": "META",
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "ORCL",
-      "tier": "core"
+      "ticker": "GOOGL",
+      "tier": "core",
+      "source": "megacap"
     },
     {
-      "ticker": "CRWV",
-      "tier": "core"
-    },
-    {
-      "ticker": "HOOD",
-      "tier": "core"
-    },
-    {
-      "ticker": "NET",
-      "tier": "core"
-    },
-    {
-      "ticker": "AI",
-      "tier": "core"
-    },
-    {
-      "ticker": "UBER",
-      "tier": "core"
-    },
-    {
-      "ticker": "APP",
-      "tier": "core"
-    },
-    {
-      "ticker": "AMC",
-      "tier": "core"
-    },
-    {
-      "ticker": "OPEN",
-      "tier": "core"
-    },
-    {
-      "ticker": "NIO",
-      "tier": "core"
-    },
-    {
-      "ticker": "SMCI",
-      "tier": "core"
-    },
-    {
-      "ticker": "BABA",
-      "tier": "core"
-    },
-    {
-      "ticker": "IWM",
-      "tier": "core"
-    },
-    {
-      "ticker": "COIN",
-      "tier": "core"
-    },
-    {
-      "ticker": "SNOW",
-      "tier": "core"
-    },
-    {
-      "ticker": "IONQ",
-      "tier": "core"
-    },
-    {
-      "ticker": "DIA",
-      "tier": "core"
-    },
-    {
-      "ticker": "OKLO",
-      "tier": "core"
-    },
-    {
-      "ticker": "CRWD",
-      "tier": "core"
-    },
-    {
-      "ticker": "ARM",
-      "tier": "core"
-    },
-    {
-      "ticker": "BMNR",
-      "tier": "core"
-    },
-    {
-      "ticker": "WMT",
-      "tier": "core"
-    },
-    {
-      "ticker": "SHOP",
-      "tier": "core"
-    },
-    {
-      "ticker": "SPCX",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "IREN",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "LITE",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "PUMP",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "WKC",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "CIFR",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "CRDO",
-      "tier": "carryover"
-    },
-    {
-      "ticker": "T",
-      "tier": "carryover"
+      "ticker": "PLTR",
+      "tier": "core",
+      "source": "megacap"
     }
   ],
   "core_in_group_sweep": [
+    "MU",
+    "ASTS",
+    "GME",
+    "AMD",
+    "TSM",
+    "SNDK",
+    "INTC",
+    "NBIS",
+    "HIMS",
+    "SOFI",
+    "AVGO",
+    "JPM",
+    "MSTR",
+    "RKLB",
+    "HOOD",
+    "ASML",
+    "NFLX",
+    "APP",
+    "ORCL",
+    "GOOG",
+    "UBER",
+    "OPEN",
+    "CRWV",
+    "AI",
+    "NET",
+    "BABA",
+    "IWM",
+    "AMC",
+    "COIN",
+    "SMCI",
+    "SNOW",
+    "IONQ",
+    "DIA",
+    "OKLO",
+    "CRWD",
+    "NIO",
+    "ARM",
+    "BMNR",
+    "WMT",
+    "SHOP",
     "MARA",
     "XOM",
     "CRM",
@@ -250,5 +108,5 @@
     "BA",
     "PDD"
   ],
-  "etf_rotation_next": 13
+  "etf_rotation_next": 2
 }
