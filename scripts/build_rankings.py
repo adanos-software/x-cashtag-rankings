@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""X stock cashtag rankings: group-sweep screening + sampling + exact counts (stdlib only).
+"""X stock cashtag rankings: group sweep + adaptive splits + sampling + daily exact counts (stdlib only).
 
-One run (details: README.md and docs/RUNBOOK.md). X calls are made strictly ONE AT A TIME:
+One run (details: README.md and docs/RUNBOOK.md). X calls are made strictly ONE AT A TIME, and the script
+generates every query (groups, split parts, tickers, samples); never build one by hand:
 
-  python3 scripts/build_rankings.py plan [--reads-left-today N]   # window, groups, budget -> work/run.json
+  python3 scripts/build_rankings.py plan [--reads-left-today N]   # window, groups, budget, split tree -> work/run.json
   loop:
     python3 scripts/build_rankings.py next-call      # prints the ONE next X call (or the next script step)
     -> make that single x tool call
@@ -12,13 +13,15 @@ One run (details: README.md and docs/RUNBOOK.md). X calls are made strictly ONE 
     python3 scripts/build_rankings.py record-error KEY --kind 429|other --reads-left-today B   (on errors;
         prints WAIT 60s / WAIT 120s / RETRY / GIVE UP / STOP)
     script steps when next-call says so: pick-samples (twice), pick-candidates
-  python3 scripts/build_rankings.py build          # complete run, or partial if group sweep + core are done
+  python3 scripts/build_rankings.py build          # complete run, or partial if group sweep + megacaps are done
   python3 scripts/build_rankings.py abandon --reason "..."   # archive an unpublishable run
-  python3 scripts/build_rankings.py next | check | calls STAGE [--all]
+  python3 scripts/build_rankings.py next | check | calls STAGE [--all] | splits-reset
 
-Every count read uses granularity=hour over the last 29 full UTC hours, so one read gives the
-5h window (last 5 buckets), the same 5 hours yesterday (first 5 buckets) and the hourly shape.
-Only tickers counted individually in THIS run are ranked; nothing is carried over.
+Order: groups (13 stock + 3 ETF) -> 10 megacaps -> adaptive 4-way splits (<= 24 reads, chosen one at a time
+from the counts just recorded; the tree persists in data/splits.json, fail-closed validation) -> 6 + 4
+samples -> daily exact counts (split leaves, sample discoveries, hot re-reads, core due today) -> build
+(latest.json, history, today.json, daily/, hourly.json, splits.json, state.json).
+Every count read uses granularity=hour over the last 29 full UTC hours.
 """
 import argparse
 import csv
@@ -45,11 +48,15 @@ NEXT_JSON = os.path.join(DATA, "next_tickers.json")
 LATEST_JSON = os.path.join(DATA, "latest.json")
 HISTORY_DIR = os.path.join(DATA, "history")
 RUN_JSON = os.path.join(WORK, "run.json")
+SPLITS_JSON = os.path.join(DATA, "splits.json")
+HOURLY_JSON = os.path.join(DATA, "hourly.json")
+TODAY_JSON = os.path.join(DATA, "today.json")
+DAILY_DIR = os.path.join(DATA, "daily")
 ARCHIVE = os.path.join(WORK, "archive")
 
 # --- method parameters -------------------------------------------------------
-METHOD = "group-sweep+sampling+counts"
-METHOD_VERSION = 2
+METHOD = "group-sweep+adaptive-splits+sampling+daily-counts"
+METHOD_VERSION = 3
 WINDOW_HOURS = 5             # ranked window: last 5 full UTC hours
 HISTORY_HOURS = 29           # every count read covers 29 hourly buckets (window + same hours yesterday)
 MAX_QUERY_LEN = 4096         # X rejects longer queries (4099 chars -> invalid request, still costs a read)
@@ -58,9 +65,22 @@ DAILY_CAP = 600              # Alexander's cap per UTC day, shared by all bots
 DAILY_QUOTA = 1000           # the x tools report "B of 1000 today"; used today = 1000 - B
 FLOOR_LEFT = DAILY_QUOTA - DAILY_CAP   # never let "reads left today" drop below this (400)
 MIN_RUN_READS = 20           # skip the run if fewer reads fit
-ETF_GROUPS_PER_RUN = 2       # ETF groups rotate, 2 per run
-SAMPLE_GROUPS = 3            # stage-1 samples: the hottest groups
-COMENTION_SAMPLES = 3        # stage-2 samples: top new tickers from stage 1 / last risers
+ETF_GROUPS_PER_RUN = 3       # ETF groups rotate, 3 per run (14 groups -> each about once a day)
+SAMPLE_GROUPS = 6            # stage-1 samples: the hottest fresh groups / split nodes
+COMENTION_SAMPLES = 4        # stage-2 samples: top new tickers from stage 1, unverified split leaves, risers
+MEGACAPS_N = 10              # config/megacaps.txt: counted individually every run
+SPLIT_READS = 24             # adaptive 4-way splits per run (3 reads with subtraction, 4 if the parent is stale)
+DAILY_COUNTS_MAX = 35        # exact 29h counts per run for split leaves, sample candidates, hot re-reads, core
+CORE_DAILY_MIN = 10          # of those, at least this many go to core tickers not yet measured this UTC day
+LEAF_MAX = 3                 # split nodes with <= 3 tickers are leaves: their members get exact daily counts
+LEAF_MIN_24H = 15            # ... if the leaf had >= 15 posts in the last 24h
+SPLIT_MIN_24H = 40           # only nodes with >= 40 posts in the last 24h are split
+NODE_MAX_AGE_HOURS = 30      # split nodes not re-measured for 30h are pruned
+MAX_NODES = 400              # cap on persistent split nodes (coldest pruned first)
+HOT_REREAD_5H = 60           # a ticker measured earlier today is re-read if its last 5h count was >= 60
+HOT_REREAD_MAX = 8           # ... at most 8 per run before discoveries/core (more only to fill unused slots)
+DRILL_CONC = 1.6             # a split part holding >= 1.6x its fair share (>= 40% of a 4-way parent) is drilled
+OVERLAP_WARN = 0.05          # subtraction: measured children exceeding the parent by > 5% -> flagged
 SAMPLE_MAX_RESULTS = 25
 CANDIDATES = 20              # individual counts for discovered + carryover tickers
 CARRYOVER_MAX = 8            # of those, at most this many carried over from the last run
@@ -68,7 +88,7 @@ CARRYOVER_MIN_MENTIONS = 25  # ... non-core tickers with >= this many mentions l
 CARRYOVER_MAX_AGE_HOURS = 12
 CORE_INDIVIDUAL = 50         # core tickers counted individually; the weakest rest go into the sweep
 CORE_FLOOR = 10              # budget shrink: core is cut first, down to this
-SPARE = 5                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
+SPARE = 4                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
 RETRY_RESERVE = 10           # extra reads per run for retries (429 / errors), on top of RUN_READS -> max ~105
 MAX_OTHER_ERRORS = 5         # stop the run after this many non-429 errors
 PACE_SECONDS = 4             # record commands pause this long, so calls stay strictly sequential (<= ~15/min)
@@ -120,11 +140,14 @@ def load_json(path, default=None):
         return json.load(f)
 
 
-def write_json(path, obj):
+def write_json(path, obj, compact=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
+        if compact:
+            json.dump(obj, f, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+        else:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, path)
 
@@ -214,6 +237,452 @@ def pack(tickers, maxlen=MAX_QUERY_LEN):
         if len(group_query(g)) > maxlen:
             raise SystemExit("packing error: group starting %s is %d chars" % (g[0], len(group_query(g))))
     return groups
+
+
+# --- persistent split tree ----------------------------------------------------
+class SplitStateError(Exception):
+    pass
+
+
+SPLIT_RESET_HINT = ("fail-closed: the persistent split state data/splits.json is inconsistent, so it is NOT used. "
+                    "Run `python3 scripts/build_rankings.py splits-reset` (no X reads; loses the refinement "
+                    "carried over from earlier runs), then `plan` again, and report it.")
+
+
+def megacap_list():
+    exclude = set(read_list("exclude_tickers.txt"))
+    return [t for t in read_list("megacaps.txt") if t not in exclude and CASHTAG_RE.match(t)][:MEGACAPS_N]
+
+
+def empty_tree():
+    return {"version": 1, "nodes": {}}
+
+
+def validate_tree(tree):
+    """Structural checks; raises SplitStateError on any inconsistency (fail closed)."""
+    nodes = tree.get("nodes")
+    if not isinstance(nodes, dict):
+        raise SplitStateError("nodes missing")
+    for nid, n in nodes.items():
+        tk = n.get("tickers")
+        if not tk or not isinstance(tk, list) or len(set(tk)) != len(tk):
+            raise SplitStateError("%s: empty or duplicate tickers" % nid)
+        par = n.get("parent")
+        if par is None:
+            if "." in nid:
+                raise SplitStateError("%s: has no parent but a child id" % nid)
+        else:
+            if par not in nodes or nid not in nodes[par].get("children", []):
+                raise SplitStateError("%s: parent %s missing or does not list it" % (nid, par))
+            if not nid.startswith(par + "."):
+                raise SplitStateError("%s: id does not extend parent id %s" % (nid, par))
+        ch = n.get("children") or []
+        if ch:
+            if len(ch) < 2 or len(set(ch)) != len(ch):
+                raise SplitStateError("%s: bad children list %s" % (nid, ch))
+            union = []
+            for c in ch:
+                if c not in nodes:
+                    raise SplitStateError("%s: child %s missing" % (nid, c))
+                if nodes[c].get("parent") != nid:
+                    raise SplitStateError("%s: child %s points to another parent" % (nid, c))
+                union += nodes[c]["tickers"]
+            if sorted(union) != sorted(tk):
+                raise SplitStateError("%s: children do not partition its tickers" % nid)
+    return True
+
+
+def load_tree():
+    tree = load_json(SPLITS_JSON, None)
+    if tree is None:
+        return empty_tree()
+    validate_tree(tree)
+    return tree
+
+
+def subtree(tree, nid):
+    out, stack = [], [nid]
+    while stack:
+        x = stack.pop()
+        out.append(x)
+        stack += tree["nodes"].get(x, {}).get("children", [])
+    return out
+
+
+def drop_children(tree, nid):
+    n = tree["nodes"][nid]
+    for c in list(n.get("children", [])):
+        for x in subtree(tree, c):
+            tree["nodes"].pop(x, None)
+    n["children"] = []
+
+
+def prune_tree(tree, roots, now):
+    """roots: {key: (kind, tickers)} = the full current packing (all stock + all ETF groups).
+    Benign changes are pruned and logged; returns a list of notes."""
+    notes = []
+    nodes = tree["nodes"]
+    for nid in [k for k, n in nodes.items() if n.get("parent") is None]:
+        if nid not in roots or roots[nid][1] != nodes[nid]["tickers"]:
+            for x in subtree(tree, nid):
+                nodes.pop(x, None)
+            notes.append("root %s re-packed or gone: subtree dropped" % nid)
+    for key, (kind, tickers) in roots.items():
+        if key not in nodes:
+            nodes[key] = {"tickers": list(tickers), "parent": None, "children": [], "kind": kind,
+                          "count_24h": None, "measured_at": None, "window_end": None, "inferred": False}
+    cut = now - timedelta(hours=NODE_MAX_AGE_HOURS)
+    for nid in sorted(nodes, key=lambda x: x.count(".")):
+        n = nodes.get(nid)
+        if n is None or n.get("parent") is None:
+            continue
+        if not n.get("window_end") or parse_iso(n["window_end"]) < cut:
+
+            drop_children(tree, n["parent"])
+            notes.append("%s children dropped (not re-measured for %dh)" % (n["parent"], NODE_MAX_AGE_HOURS))
+
+    # collapse cold splits: all children are leaves and together are quiet
+    changed = True
+    while changed:
+        changed = False
+        for nid, n in list(nodes.items()):
+            ch = n.get("children") or []
+            if ch and all(not nodes[c].get("children") for c in ch):
+                tot = sum(nodes[c].get("count_24h") or 0 for c in ch)
+                if tot < SPLIT_MIN_24H:
+                    drop_children(tree, nid)
+                    notes.append("%s collapsed (children only %d posts/24h)" % (nid, tot))
+                    changed = True
+    while len(nodes) > MAX_NODES:
+        cands = [(sum(nodes[c].get("count_24h") or 0 for c in n["children"]), nid) for nid, n in nodes.items()
+                 if n.get("children") and all(not nodes[c].get("children") for c in n["children"])]
+        if not cands:
+            break
+        drop_children(tree, min(cands)[1])
+        notes.append("node cap: %s collapsed" % min(cands)[1])
+    validate_tree(tree)
+    return notes
+
+
+def split_tickers(tickers, k=4):
+    n = len(tickers)
+    k = min(k, n)
+    out, start = [], 0
+    for i in range(k):
+        size = n // k + (1 if i < n % k else 0)
+        out.append(tickers[start:start + size])
+        start += size
+    return out
+
+
+def node_count_24h(run, nid):
+    c = run["counts"].get(nid)
+    if c and c.get("buckets") is not None:
+        return sum(c["buckets"][-24:])
+    return run["tree"]["nodes"][nid].get("count_24h")
+
+
+def node_resid_24h(run, nid):
+    """Node posts in the last 24h minus the 24h counts of members already counted individually in the last
+    30h ("explained away": core tickers inside the groups would otherwise attract every drill). Used only
+    to choose splits/leaves, never published."""
+    c24 = node_count_24h(run, nid)
+    if c24 is None:
+        return None
+    known = run.get("known_24h") or {}
+    return max(0, c24 - sum(known.get(t, 0) for t in run["tree"]["nodes"][nid]["tickers"]))
+
+
+def node_fresh(run, nid):
+    c = run["counts"].get(nid)
+    return bool(c) and not c.get("inferred")
+
+
+def split_reads_planned(run):
+    return sum(len(op["measure"]) for op in run["splits"])
+
+
+def node_conc(run, nid):
+    """Concentration of a split part: its share of the parent's posts x number of parts (1.0 = fair share)."""
+    n = run["tree"]["nodes"][nid]
+    par = n.get("parent")
+    if par is None:
+        return None
+    pc = n.get("parent_resid_24h") or node_resid_24h(run, par)
+    c = node_resid_24h(run, nid)
+    if not pc or c is None:
+        return None
+    return c * len(run["tree"]["nodes"][par]["children"]) / pc
+
+
+def choose_split(run):
+    """Pick the next node to split; mutates run (adds the 4 parts and the split op). None when done.
+    Heavy-hitter search in drill chains:
+      1 continue: a part created in THIS run holding >= DRILL_CONC x its fair share (drill on, 3 reads)
+      2 resume:   a part from an earlier run that was concentrated (4 reads: its parent count is stale)
+      3 start:    a root group counted in this run and not split yet (3 reads)
+      4 refresh:  a root counted in this run whose old parts are all leaves: re-split it fresh (3 reads)
+    within a class the node with the most posts in the last 24h first; nodes need >= SPLIT_MIN_24H posts."""
+    left = min(run["targets"]["splits"] - split_reads_planned(run), reads_remaining(run))
+    nodes = run["tree"]["nodes"]
+    created = {c for op in run["splits"] for c in op["children"]}
+    cands = []
+    for nid, n in nodes.items():
+        if len(n["tickers"]) <= LEAF_MAX or nid in run["skipped"]:
+            continue
+        c24 = node_resid_24h(run, nid)
+        if c24 is None or c24 < SPLIT_MIN_24H:
+            continue
+        fresh = node_fresh(run, nid)
+        if n.get("parent") is None:
+            if not fresh:
+                continue          # roots only when counted in this run (ETF roots rotate)
+            if not n.get("children"):
+                cls = 3
+            elif nid not in {op["node"] for op in run["splits"]} and \
+                    all(not nodes[c].get("children") for c in n["children"]) and \
+                    not any(c in created for c in n["children"]):
+                cls = 4
+            else:
+                continue
+        else:
+            if n.get("children"):
+                continue
+            conc = node_conc(run, nid)
+            if conc is None or conc < DRILL_CONC:
+                continue
+            cls = 1 if nid in created else 2
+        cost = 3 if fresh else 4
+        if cost <= left:
+            cands.append((cls, -c24, cost, nid))
+    if not cands:
+        return None
+    cls, _, cost, nid = min(cands)
+    n = nodes[nid]
+    if n.get("children"):
+        drop_children(run["tree"], nid)       # refresh: old (stale, leaf-only) parts replaced
+    parts = split_tickers(n["tickers"])
+    ids = ["%s.%d" % (nid, i + 1) for i in range(len(parts))]
+    pc = node_count_24h(run, nid)
+    pr = node_resid_24h(run, nid)
+    for cid, tk in zip(ids, parts):
+        if cid in nodes:
+            raise SplitStateError("child id %s already exists" % cid)
+        nodes[cid] = {"tickers": tk, "parent": nid, "children": [], "kind": n["kind"], "count_24h": None,
+                      "measured_at": None, "window_end": None, "inferred": False, "parent_24h": pc,
+                      "parent_resid_24h": pr}
+    n["children"] = ids
+    fresh = cost == 3 and len(ids) == 4
+    op = {"node": nid, "class": {1: "continue", 2: "resume", 3: "start", 4: "refresh"}[cls], "children": ids,
+          "measure": ids[:3] if fresh else ids, "infer": ids[3] if fresh else None, "parent_24h": pc,
+          "parent_resid_24h": pr}
+    run["splits"].append(op)
+    return op
+
+
+def finalize_splits(run):
+    """Subtraction for completed split ops: inferred child = parent - sum(3 measured), per hour, >= 0."""
+    notes = []
+    for op in run["splits"]:
+        if not op.get("infer") or op.get("inferred_done"):
+            continue
+        if any(c in run["skipped"] for c in op["measure"]) or op["node"] in run["skipped"]:
+            op["inferred_done"] = True
+            op["infer_failed"] = "a measured part was skipped"
+            continue
+        if not all(c in run["counts"] for c in op["measure"]):
+            continue
+        pb = run["counts"][op["node"]]["buckets"]
+        sums = [sum(run["counts"][c]["buckets"][i] for c in op["measure"]) for i in range(len(pb))]
+        inf = [max(0, p - s) for p, s in zip(pb, sums)]
+        over = sum(max(0, s - p) for p, s in zip(pb, sums))
+        run["counts"][op["infer"]] = {"buckets": inf, "recorded_at": iso(utcnow()), "inferred": True}
+        op["inferred_done"] = True
+        op["overlap_excess"] = over
+        op["parent_total"] = sum(pb)
+        if sum(pb) and sum(sums) > (1 + OVERLAP_WARN) * sum(pb) and sum(inf) == 0:
+            op["overlap_warning"] = True
+            notes.append("%s: measured parts exceed parent by %d posts (overlap)" % (op["node"], sum(sums) - sum(pb)))
+    return notes
+
+
+def cmd_splits_reset(args):
+    write_json(SPLITS_JSON, empty_tree())
+    print("data/splits.json reset to an empty tree (refinement from earlier runs dropped; no X reads)")
+
+
+# --- hourly store / daily aggregate -------------------------------------------
+def hour_key(dt):
+    return dt.strftime("%Y-%m-%dT%H")
+
+
+def load_hourly():
+    h = load_json(HOURLY_JSON, None) or {}
+    h.setdefault("version", 1)
+    h.setdefault("tickers", {})
+    h.setdefault("nodes", {})
+    h.setdefault("seen", {})
+    h.setdefault("windows", [])
+    return h
+
+
+def buckets_to_hours(run, buckets):
+    hs = parse_iso(run["history_start"])
+    return {hour_key(hs + timedelta(hours=i)): v for i, v in enumerate(buckets)}
+
+
+def day_of(window_end_iso):
+    return (parse_iso(window_end_iso) - timedelta(minutes=1)).strftime("%Y-%m-%d")
+
+
+def ticker_nodes_index(hourly):
+    idx = {}
+    for nid, n in hourly["nodes"].items():
+        if n.get("inferred"):
+            continue        # an inferred (subtracted) count is not an upper bound
+        for t in n["tickers"]:
+            idx.setdefault(t, []).append(nid)
+    return idx
+
+
+def daily_entries(hourly, day, through, universe, core, mega):
+    """Aggregate for one UTC day over the hours [day 00:00, through)."""
+    d0 = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    hours = []
+    h = d0
+    while h < min(through, d0 + timedelta(days=1)):
+        hours.append(hour_key(h))
+        h += timedelta(hours=1)
+    idx = ticker_nodes_index(hourly)
+    seen = hourly["seen"].get(day, {})
+    names = {t for t, v in seen.items() if v.get("authors")}      # sampled with >= 1 clean post
+    for t, rec in hourly["tickers"].items():
+        if any(k in rec["h"] for k in hours):
+            names.add(t)
+    out = []
+    windows = [w for w in hourly["windows"] if day_of(w) == day]
+    for t in sorted(names):
+        rec = hourly["tickers"].get(t, {"h": {}})
+        exact = {k: rec["h"][k] for k in hours if k in rec["h"]}
+        missing = [k for k in hours if k not in exact]
+        bound = sum(exact.values())
+        for k in missing:
+            vals = [hourly["nodes"][nid]["h"][k] for nid in idx.get(t, []) if k in hourly["nodes"][nid]["h"]]
+            if not vals:
+                bound = None
+                break
+            bound += min(vals)
+        sv = seen.get(t, {})
+        tier = "megacap" if t in mega else ("core" if t in core else "other")
+        e = {"ticker": t, "cashtag": "$" + t, "tier": tier,
+             "asset_type": (universe.get(t) or {}).get("asset_type"),
+             "status": ("exact" if exact and not missing else "partial" if exact else
+                        "bounded" if bound is not None else "seen"),
+             "count": sum(exact.values()) if exact and not missing else None,
+             "exact_part": sum(exact.values()) if exact else None,
+             "exact_hours": len(exact), "day_hours": len(hours),
+             "upper_bound": bound,
+             "first_seen": sv.get("first_seen") or rec.get("first_measured"),
+             "last_measured": rec.get("last_measured"),
+             "sources": sorted(set(sv.get("sources", [])) | set(rec.get("sources", [])))}
+        if sv.get("total"):
+            e["sample_posts"] = sv["total"]
+            e["sample_clean_authors"] = len(sv.get("authors", []))
+            e["sample_clean_share"] = round(sv.get("clean", 0) / sv["total"], 2)
+        if tier == "other":
+            a = {"authors": set(sv.get("authors", [])), "total": sv.get("total", 0),
+                 "share": (sv.get("clean", 0) / sv["total"]) if sv.get("total") else 0.0}
+            e["held_back"] = not clean_ok(a)
+            if e["held_back"]:
+                e["held_back_reason"] = ("no clean sample evidence today" if not sv.get("total") else
+                                         "sample today: %d posts, %.0f%% clean, %d clean authors"
+                                         % (a["total"], 100 * a["share"], len(a["authors"])))
+        else:
+            e["held_back"] = False
+        wins = {}
+        for w in windows:
+            we = parse_iso(w)
+            ks = [hour_key(we - timedelta(hours=i)) for i in range(WINDOW_HOURS, 0, -1)]
+            if all(k in rec["h"] for k in ks):
+                wins[w] = sum(rec["h"][k] for k in ks)
+        if wins:
+            e["windows_5h"] = wins
+        out.append(e)
+    out.sort(key=lambda e: (-(e["count"] if e["count"] is not None else
+                              (e["exact_part"] or 0) if e["status"] == "partial" else -1),
+                            -(e["upper_bound"] or 0), e["ticker"]))
+    return out, hours
+
+
+def write_daily(hourly, day, through, universe, core, mega, path, now):
+    entries, hours = daily_entries(hourly, day, through, universe, core, mega)
+    stat = {}
+    for e in entries:
+        stat[e["status"]] = stat.get(e["status"], 0) + 1
+    write_json(path, {
+        "generated_at": iso(now),
+        "day": day,
+        "day_definition": ("UTC calendar day %s, hours 00:00 up to %s UTC (%d of 24 hours so far)"
+                           % (day, iso(min(through, datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                                               + timedelta(days=1))), len(hours))),
+        "method": METHOD,
+        "status_counts": stat,
+        "tickers_seen": len(entries),
+        "talked_about_today": sum(1 for e in entries if not e["held_back"] and
+                                  ((e["count"] or 0) > 0 or (e["exact_part"] or 0) > 0)),
+        "fields": {
+            "status": ("exact = every hour of the day so far measured individually (count is exact); partial = "
+                       "some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from "
+                       "the smallest measured group/split node containing the ticker; seen = mentioned in a "
+                       "sample, no count"),
+            "upper_bound": ("exact hours + for every other hour the minimum count of a measured (not subtracted) "
+                            "group/node that contains the ticker; null if some hour has no such node"),
+            "windows_5h": "exact 5h window counts back-filled from hourly buckets (keyed by window end)",
+            "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)",
+        },
+        "tickers": entries,
+    })
+    return entries
+
+
+def update_hourly(run, hourly, agg, now):
+    """Store every measured ticker/node series (hourly), the run window, and today's sample evidence."""
+    for key, c in run["counts"].items():
+        hrs = buckets_to_hours(run, c["buckets"])
+        if key in run["tree"]["nodes"]:
+            hourly["nodes"][key] = {"tickers": run["tree"]["nodes"][key]["tickers"], "h": hrs,
+                                    "inferred": bool(c.get("inferred")), "window_end": run["window_end"]}
+        else:
+            rec = hourly["tickers"].setdefault(key, {"h": {}, "sources": []})
+            rec["h"].update(hrs)
+            rec.setdefault("first_measured", c["recorded_at"])
+            rec["last_measured"] = c["recorded_at"]
+            rec["last_window_end"] = run["window_end"]
+            rec["last_5h"] = sum(c["buckets"][-WINDOW_HOURS:])
+            src = (run.get("count_sources") or {}).get(key)
+            if src and src not in rec["sources"]:
+                rec["sources"].append(src)
+    if run["window_end"] not in hourly["windows"]:
+        hourly["windows"].append(run["window_end"])
+    day = day_of(run["window_end"])
+    seen = hourly["seen"].setdefault(day, {})
+    for t, a in agg.items():
+        sv = seen.setdefault(t, {"first_seen": run["window_end"], "sources": ["sample"], "authors": [],
+                                 "clean": 0, "total": 0})
+        sv["authors"] = sorted(set(sv["authors"]) | set(a["authors"]))
+        sv["clean"] += a["posts"]
+        sv["total"] += a["total"]
+    # keep two UTC days
+    keep = (parse_iso(run["window_end"]) - timedelta(hours=1)).replace(hour=0) - timedelta(days=1)
+    kk = hour_key(keep)
+    for rec in hourly["tickers"].values():
+        rec["h"] = {k: v for k, v in rec["h"].items() if k >= kk}
+    hourly["tickers"] = {t: r for t, r in hourly["tickers"].items() if r["h"]}
+    cut = parse_iso(run["window_end"]) - timedelta(hours=NODE_MAX_AGE_HOURS)
+    hourly["nodes"] = {k: n for k, n in hourly["nodes"].items() if parse_iso(n["window_end"]) >= cut}
+    hourly["seen"] = {d: v for d, v in hourly["seen"].items() if d >= keep.strftime("%Y-%m-%d")}
+    hourly["windows"] = [w for w in hourly["windows"] if parse_iso(w) >= keep]
+
 
 
 def metrics(b):
@@ -358,18 +827,6 @@ def window_for(now):
     return end - timedelta(hours=WINDOW_HOURS), end
 
 
-def size_run(budget, n_stock_groups, n_etf_groups_avail):
-    """Split a read budget into steps. Shrink order: core (to CORE_FLOOR), ETF groups,
-    spare (to 1), samples (to 2), candidates (to 3), then core further."""
-    t = {"stock_groups": n_stock_groups, "etf_groups": min(ETF_GROUPS_PER_RUN, n_etf_groups_avail),
-         "samples": SAMPLE_GROUPS + COMENTION_SAMPLES, "candidates": CANDIDATES,
-         "core": CORE_INDIVIDUAL, "spare": SPARE}
-    over = lambda: sum(t.values()) - budget
-    for key, floor in (("core", CORE_FLOOR), ("etf_groups", 0), ("spare", 1), ("samples", 2),
-                       ("candidates", 3), ("core", 0), ("samples", 0), ("candidates", 0), ("spare", 0)):
-        if over() > 0:
-            t[key] = max(floor, t[key] - over())
-    return t, over() <= 0
 
 
 # --- run file ----------------------------------------------------------------
@@ -404,7 +861,8 @@ def log_defaults(run):
 
 
 def planned_used(run):
-    return len(run["counts"]) + len(run["samples"])
+    """X reads made for planned calls (subtracted split parts are computed, not read)."""
+    return sum(1 for c in run["counts"].values() if not c.get("inferred")) + len(run["samples"])
 
 
 def reads_used(run):
@@ -450,13 +908,38 @@ def archive_run(tag):
 
 
 # --- plan --------------------------------------------------------------------
+def size_run(budget, n_stock_groups, n_etf_groups_avail):
+    """Split a read budget into steps. Defaults: stock groups (all), megacaps 10, ETF groups 3, splits 24,
+    samples 10, spare 4, daily counts = the rest (<= 35). Shrink order when the budget is smaller:
+    daily counts (to 10), splits (to 9), ETF groups (to 1), samples (to 4), spare (to 1), daily counts,
+    splits, samples, ETF groups (to 0), megacaps (to 3), spare, megacaps (to 0)."""
+    t = {"stock_groups": n_stock_groups, "megacaps": MEGACAPS_N,
+         "etf_groups": min(ETF_GROUPS_PER_RUN, n_etf_groups_avail), "splits": SPLIT_READS,
+         "samples": SAMPLE_GROUPS + COMENTION_SAMPLES, "spare": SPARE, "dailies": 0}
+    t["dailies"] = max(10, min(DAILY_COUNTS_MAX, budget - sum(t.values())))
+    over = lambda: sum(t.values()) - budget
+    for key, floor in (("dailies", 10), ("splits", 9), ("etf_groups", 1), ("samples", 4), ("spare", 1),
+                       ("dailies", 0), ("splits", 0), ("samples", 0), ("etf_groups", 0), ("megacaps", 3),
+                       ("spare", 0), ("megacaps", 0)):
+        if over() > 0:
+            t[key] = max(floor, t[key] - over())
+    return t, over() <= 0
+
+
+def current_packing(universe):
+    exclude = set(read_list("exclude_tickers.txt"))
+    mega = set(megacap_list())
+    stock = sorted(t for t, r in universe.items() if r["asset_type"] == "Stock" and t not in exclude and t not in mega)
+    etf = sorted(t for t, r in universe.items() if r["asset_type"] == "ETF" and t not in exclude and t not in mega)
+    return pack(stock), pack(etf), stock, etf
+
+
 def cmd_plan(args):
     now = parse_iso(args.now) if args.now else utcnow()
     start, end = window_for(now)
     hist_start = end - timedelta(hours=HISTORY_HOURS)
     universe = load_universe()
     state = load_state()
-    exclude = set(read_list("exclude_tickers.txt"))
     budget = RUN_READS
     if args.reads_left_today is not None:
         budget = min(RUN_READS, args.reads_left_today - FLOOR_LEFT - RETRY_RESERVE)
@@ -464,31 +947,37 @@ def cmd_plan(args):
             print("SKIP: only %d reads fit under the daily cap (reads left %d, floor %d); do not run."
                   % (budget, args.reads_left_today, FLOOR_LEFT))
             sys.exit(3)
-    core = core_priority(state)
-    core_set = set(core)
-    etf_tickers = sorted(t for t, r in universe.items()
-                         if r["asset_type"] == "ETF" and t not in core_set and t not in exclude)
-    etf_groups = pack(etf_tickers)
-    stock_nc = [t for t, r in universe.items()
-                if r["asset_type"] == "Stock" and t not in core_set and t not in exclude]
-    # size with the default core split first, then re-pack with the actual demoted core
-    for _ in range(3):
-        guess, _ok = size_run(budget, len(pack(sorted(stock_nc + core[CORE_INDIVIDUAL:]))), len(etf_groups))
-        demoted = core[min(len(core), max(guess["core"], 0)):]
-        stock_groups = pack(sorted(set(stock_nc) | set(demoted)))
-        targets, ok = size_run(budget, len(stock_groups), len(etf_groups))
-        if targets["core"] == guess["core"]:
-            break
+    mega = megacap_list()
+    core = [t for t in core_priority(state) if t not in mega]
+    stock_groups, etf_groups, stock_t, etf_t = current_packing(universe)
+    targets, ok = size_run(budget, len(stock_groups), len(etf_groups))
     if not ok:
         print("SKIP: the stock sweep alone (%d reads) does not fit the budget of %d." % (len(stock_groups), budget))
         sys.exit(3)
+    roots = {}
+    for i, g in enumerate(stock_groups):
+        roots["S%02d" % (i + 1)] = ("stock", g)
+    for i, g in enumerate(etf_groups):
+        roots["E%02d" % (i + 1)] = ("etf", g)
+    try:
+        tree = load_tree()
+        prune_notes = prune_tree(tree, roots, end)
+    except SplitStateError as e:
+        print("ERROR: split state inconsistent (%s). %s" % (e, SPLIT_RESET_HINT))
+        sys.exit(4)
+    hourly = load_hourly()
+    known = {}
+    for t, rec in hourly["tickers"].items():
+        if rec.get("last_window_end") and parse_iso(rec["last_window_end"]) >= end - timedelta(hours=NODE_MAX_AGE_HOURS):
+            le = parse_iso(rec["last_window_end"])
+            known[t] = sum(rec["h"].get(hour_key(le - timedelta(hours=i)), 0) for i in range(1, 25))
     n = len(etf_groups)
     first = state["etf_rotation_next"] % n if n else 0
     etf_pick = [(first + i) % n for i in range(targets["etf_groups"])] if n else []
     groups = []
     for i, g in enumerate(stock_groups):
         groups.append({"key": "S%02d" % (i + 1), "kind": "stock", "tickers": g,
-                       "demoted_core": [t for t in g if t in core_set]})
+                       "demoted_core": [t for t in g if t in set(core)]})
     for i in etf_pick:
         groups.append({"key": "E%02d" % (i + 1), "kind": "etf", "tickers": etf_groups[i], "demoted_core": []})
     for g in groups:
@@ -508,14 +997,21 @@ def cmd_plan(args):
         "history_start": iso(hist_start),
         "budget": budget,
         "targets": targets,
+        "megacaps": mega[:targets["megacaps"]],
         "core_order": core,
-        "core_individual_planned": core[:targets["core"]],
+        "core_individual_planned": mega[:targets["megacaps"]],
         "etf_groups_total": n,
-        "etf_tickers_total": len(etf_tickers),
+        "etf_tickers_total": len(etf_t),
         "etf_rotation_first": first,
-        "stock_tickers_swept": sum(len(g) for g in stock_groups),
+        "stock_tickers_swept": len(stock_t),
         "groups": groups,
+        "tree": tree,
+        "tree_prune_notes": prune_notes,
+        "known_24h": known,
+        "splits": [],
+        "splits_done": False,
         "counts": {},
+        "count_sources": {t: "megacap" for t in mega[:targets["megacaps"]]},
         "samples": {},
         "picks": {"samples1": None, "samples2": None, "individual": None},
         "log": {"reads_left_today": args.reads_left_today, "reads_left_history": [], "extra_reads": 0,
@@ -529,9 +1025,11 @@ def cmd_plan(args):
     print("window %s -> %s UTC (29h buckets from %s); budget %d reads" % (run["window_start"], run["window_end"],
                                                                           run["history_start"], budget))
     print("targets:", json.dumps(targets), "total", sum(targets.values()))
-    print("groups: %d stock (%d tickers incl. %d demoted core) + ETF %s of %d"
-          % (len(stock_groups), run["stock_tickers_swept"], len(demoted),
-             ",".join(g["key"] for g in groups if g["kind"] == "etf") or "-", n))
+    print("groups: %d stock (%d tickers incl. %d core) + ETF %s of %d; megacaps: %s"
+          % (len(stock_groups), len(stock_t), len(core), ",".join(g["key"] for g in groups if g["kind"] == "etf")
+             or "-", n, " ".join(run["megacaps"])))
+    print("split state: %d nodes carried over%s" % (len(tree["nodes"]),
+                                                     ("; " + "; ".join(prune_notes[:6])) if prune_notes else ""))
     print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
 
 
@@ -546,6 +1044,9 @@ def sample_args(run, query):
             "post.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"}
 
 
+STAGES = ("groups", "megacaps", "splits", "samples", "counts")
+
+
 def pending_calls(run, stage):
     out = []
     skipped = set(run.get("skipped") or [])
@@ -553,6 +1054,17 @@ def pending_calls(run, stage):
         for g in run["groups"]:
             if g["key"] not in run["counts"] and g["key"] not in skipped:
                 out.append((g["key"], "get_posts_counts_recent", count_args(run, g["query"])))
+    elif stage == "megacaps":
+        coll = collisions()
+        for t in run["megacaps"]:
+            if t not in run["counts"] and t not in skipped:
+                out.append((t, "get_posts_counts_recent", count_args(run, ticker_query(t, coll))))
+    elif stage == "splits":
+        for op in run["splits"]:
+            for cid in op["measure"]:
+                if cid not in run["counts"] and cid not in skipped:
+                    out.append((cid, "get_posts_counts_recent",
+                                count_args(run, group_query(run["tree"]["nodes"][cid]["tickers"]))))
     elif stage == "samples":
         for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or []):
             if p["key"] not in run["samples"] and p["key"] not in skipped:
@@ -564,6 +1076,11 @@ def pending_calls(run, stage):
     return out
 
 
+def any_pending(run):
+    return any(pending_calls(run, st) for st in STAGES)
+
+
+# --- calls (exact tool arguments) ---------------------------------------------
 PACING_NOTE = ("PACING: X calls strictly one at a time (never parallel tool calls). After each call, run its "
                "record command (it pauses %ds) before the next call -> at most ~15 calls per minute. "
                "On an error run record-error and follow its instruction." % PACE_SECONDS)
@@ -591,20 +1108,37 @@ def cmd_calls(args):
 
 
 def next_action(run):
-    """(kind, payload): kind in stop/call/pick-samples/pick-candidates/build."""
+    """(kind, payload): kind in stop/call/pick-samples/pick-candidates/build. May create the next split
+    (mutates run; callers save)."""
     if run.get("stopped"):
         return "stop", run["stopped"]
-    for stage, gate in (("groups", None), ("samples", "samples1"), ("counts", "individual")):
-        if stage == "samples" and run["picks"]["samples1"] is None:
-            return "pick-samples", "stage 1"
-        if stage == "counts":
-            if run["picks"]["samples2"] is None:
-                return "pick-samples", "stage 2"
-            if run["picks"]["individual"] is None:
-                return "pick-candidates", None
+    for stage in ("groups", "megacaps"):
         calls = pending_calls(run, stage)
         if calls:
             return "call", (stage, calls)
+    if not run.get("splits_done"):
+        calls = pending_calls(run, "splits")
+        if not calls:
+            finalize_splits(run)
+            op = choose_split(run)
+            if op is None:
+                run["splits_done"] = True
+            else:
+                calls = pending_calls(run, "splits")
+        if calls:
+            return "call", ("splits", calls)
+    if run["picks"]["samples1"] is None:
+        return "pick-samples", "stage 1"
+    calls = pending_calls(run, "samples")
+    if calls:
+        return "call", ("samples", calls)
+    if run["picks"]["samples2"] is None:
+        return "pick-samples", "stage 2"
+    if run["picks"]["individual"] is None:
+        return "pick-candidates", None
+    calls = pending_calls(run, "counts")
+    if calls:
+        return "call", ("counts", calls)
     return "build", None
 
 
@@ -617,13 +1151,23 @@ def record_hint(stage, key):
 
 def cmd_next_call(args):
     run = load_run()
-    kind, payload = next_action(run)
+    try:
+        kind, payload = next_action(run)
+    except SplitStateError as e:
+        save_run(run)
+        sys.exit("ERROR: split state inconsistent (%s). Do not hand-build a split; build now if the script "
+                 "allows a partial run, else abandon, and report." % e)
+    save_run(run)
     if kind != "call":
         cmd_next(args)
         return
     stage, calls = payload
     k, tool, a = calls[0]
     print_call(k, tool, a)
+    if stage == "splits":
+        node = run["tree"]["nodes"][k]
+        print("# split part %s of %s: %d tickers %s..%s (query generated by the script; copy verbatim)"
+              % (k, node["parent"], len(node["tickers"]), node["tickers"][0], node["tickers"][-1]))
     print("# then: " + record_hint(stage, k))
     print("# on an error/429: python3 scripts/build_rankings.py record-error %s --kind 429|other --reads-left-today <B>" % k)
     print("# %d %s calls pending incl. this one; remaining %d planned reads (+%d retry reserve)"
@@ -638,8 +1182,7 @@ def stop_checks(run):
     msg = None
     if lg.get("errors_other", 0) >= MAX_OTHER_ERRORS:
         msg = "%d non-429 errors (limit %d)" % (lg["errors_other"], MAX_OTHER_ERRORS)
-    elif int(lg.get("extra_reads", 0)) >= RETRY_RESERVE and any(
-            pending_calls(run, st) for st in ("groups", "samples", "counts")):
+    elif int(lg.get("extra_reads", 0)) >= RETRY_RESERVE and any_pending(run):
         msg = "retry reserve of %d reads used up" % RETRY_RESERVE
     elif left is not None and left <= FLOOR_LEFT:
         msg = "reads left today at/below %d (daily cap)" % FLOOR_LEFT
@@ -650,25 +1193,22 @@ def stop_checks(run):
 
 def partial_ok(run):
     """A run that did not finish may still be built (labelled partial) if the whole group sweep
-    and all planned core counts are done."""
+    and all megacap counts are done."""
     miss = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
     if miss:
         return False, "group sweep incomplete: %s" % ",".join(miss)
-    picks = run["picks"].get("individual")
-    if not picks:
-        return False, "candidates/core not picked yet, core not counted"
-    core_miss = [p["ticker"] for p in picks if p["source"] == "core" and p["ticker"] not in run["counts"]]
-    if core_miss:
-        return False, "core not fully counted (%d missing: %s)" % (len(core_miss), ",".join(core_miss[:10]))
+    mmiss = [t for t in run["megacaps"] if t not in run["counts"]]
+    if mmiss:
+        return False, "megacaps not fully counted (%d missing: %s)" % (len(mmiss), ",".join(mmiss))
     return True, None
 
 
 def run_complete(run):
     if run.get("skipped") or run.get("stopped"):
         return False
-    if run["picks"].get("individual") is None:
+    if run["picks"].get("individual") is None or not run.get("splits_done"):
         return False
-    return not any(pending_calls(run, st) for st in ("groups", "samples", "counts"))
+    return not any_pending(run)
 
 
 def stop_advice(run):
@@ -696,7 +1236,8 @@ def parse_record(item):
 
 def cmd_record(args):
     run = load_run()
-    known = {g["key"] for g in run["groups"]}
+    known = {g["key"] for g in run["groups"]} | set(run["megacaps"])
+    known |= {c for op in run["splits"] for c in op["measure"]}
     known |= {p["ticker"] for p in (run["picks"]["individual"] or [])}
     errors = 0
     for item in args.pairs:
@@ -707,11 +1248,17 @@ def cmd_record(args):
             errors += 1
             continue
         key = key.upper()
+        if key in run["counts"]:
+            print("ERROR: %s is already recorded" % key)
+            errors += 1
+            continue
         if key not in known:
             print("ERROR: %s is not a planned group or picked ticker (run pick-candidates first?)" % key)
             errors += 1
             continue
         run["counts"][key] = {"buckets": buckets, "recorded_at": iso(utcnow())}
+    for note in finalize_splits(run):
+        print("WARNING:", note)
     if args.extra_reads:
         run["log"]["extra_reads"] += args.extra_reads
         run["log"]["errors_other"] += args.extra_reads
@@ -728,7 +1275,7 @@ def cmd_record(args):
               "run `abandon --reason skip`, do not build or commit." % (left - FLOOR_LEFT - RETRY_RESERVE, RETRY_RESERVE))
     elif msg:
         print("STOP: %s. %s" % (msg, stop_advice(run)))
-    elif reads_remaining(run) == 0 and any(pending_calls(run, st) for st in ("groups", "samples", "counts")):
+    elif reads_remaining(run) == 0 and any_pending(run):
         print("STOP: run budget exhausted. " + stop_advice(run))
     if errors:
         sys.exit(1)
@@ -879,22 +1426,39 @@ def analyze_samples(run, keys=None):
     return agg, stats
 
 
+def fresh_frontier(run):
+    """Nodes counted (or subtracted) in this run that have no children: [(nid, node, metrics)]."""
+    out = []
+    for nid, n in run["tree"]["nodes"].items():
+        if n.get("children") or nid not in run["counts"]:
+            continue
+        out.append((nid, n, metrics(run["counts"][nid]["buckets"])))
+    return out
+
+
+def measured_today(hourly, t, day):
+    rec = hourly["tickers"].get(t)
+    return bool(rec) and rec.get("last_window_end") and day_of(rec["last_window_end"]) == day
+
+
 def cmd_pick_samples(args):
     run = load_run()
     picks = run["picks"]
-    missing = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
-    if missing and not args.force:
-        sys.exit("group counts missing for %s (record them, or use --force to continue without)" % ",".join(missing))
+    if (any(pending_calls(run, st) for st in ("groups", "megacaps", "splits")) or not run.get("splits_done")) \
+            and not args.force:
+        sys.exit("group/megacap/split counts not finished (follow next-call, or --force to continue without)")
     rem = reads_remaining(run)
     if picks["samples1"] is None:
-        gm = sorted(group_metrics(run), key=lambda x: (-x[1]["heat"], x[0]["kind"] != "stock",
-                                                        -x[1]["mentions"], x[0]["key"]))
+        ff = [x for x in fresh_frontier(run) if x[2]["adjusted"] > 0]
+        scored = sorted(ff, key=lambda x: (-(x[2]["adjusted"] / math.sqrt(len(x[1]["tickers"]))), x[0]))
         n = min(SAMPLE_GROUPS, run["targets"]["samples"], rem)
-        picks["samples1"] = [{"key": "smp-" + g["key"], "kind": "group", "target": g["key"], "query": g["query"],
-                              "heat": m["heat"]} for g, m in gm[:n]]
+        picks["samples1"] = [{"key": "smp-" + nid, "kind": "node", "target": nid,
+                              "query": group_query(node["tickers"]), "size": len(node["tickers"]),
+                              "heat": round(m["adjusted"] / math.sqrt(len(node["tickers"])), 1)}
+                             for nid, node, m in scored[:n]]
         save_run(run)
-        print("stage 1: sample %s" % ", ".join("%s (heat %.1f)" % (p["target"], p["heat"]) for p in picks["samples1"]))
-        print("group heat ranking:", ", ".join("%s %.1f" % (g["key"], m["heat"]) for g, m in gm))
+        print("stage 1: sample %s" % ", ".join("%s (%d tickers, score %.1f)" % (p["target"], p["size"], p["heat"])
+                                              for p in picks["samples1"]))
         print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
         return
     pend1 = [p["key"] for p in picks["samples1"] if p["key"] not in run["samples"]]
@@ -903,26 +1467,39 @@ def cmd_pick_samples(args):
     if picks["samples2"] is None:
         n = min(COMENTION_SAMPLES, max(0, run["targets"]["samples"] - len(picks["samples1"])), rem)
         agg, _ = analyze_samples(run)
-        core_ind = set(run["core_individual_planned"])
-        ranked = sorted(((t, a) for t, a in agg.items() if t not in core_ind),
+        mega = set(run["megacaps"])
+        hourly = load_hourly()
+        day = day_of(run["window_end"])
+        seen = hourly["seen"].get(day, {})
+        ranked = sorted(((t, a) for t, a in agg.items() if t not in mega and not measured_today(hourly, t, day)),
                         key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
-        chosen = [t for t, a in ranked if clean_ok(a)][:n]
-        st = load_state()
-        end = parse_iso(run["window_end"])
-        # then last run's risers / strong non-core tickers, those without a fresh clean check first
-        # (a carryover ticker is only counted again if it passed a clean check <= 24h ago)
-        prev = [r for r in st.get("last_run_noncore", []) if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS]
-        prev.sort(key=lambda r: (clean_check_fresh(r, end), not r.get("riser"), -r["mentions"]))
-        for r in prev + st["risers"]:
+        chosen = [t for t, a in ranked if clean_ok(a)][:max(0, n - 1)]
+        # unverified hot split leaves: which member is it, and is it clean?
+        leaves = sorted((x for x in fresh_frontier(run) if len(x[1]["tickers"]) <= LEAF_MAX
+                         and (node_resid_24h(run, x[0]) or 0) >= LEAF_MIN_24H),
+                        key=lambda x: -(node_resid_24h(run, x[0]) or 0))
+        for nid, node, m in leaves:
+            for t in node["tickers"]:
+                if len(chosen) >= n:
+                    break
+                if t not in chosen and t not in mega and t not in run["core_order"] and t not in agg \
+                        and len(seen.get(t, {}).get("authors", [])) < MIN_AUTHORS:
+                    chosen.append(t)
+        for r in load_state()["risers"]:
             if len(chosen) >= n:
                 break
-            if r["ticker"] not in chosen and r["ticker"] not in core_ind:
+            if r["ticker"] not in chosen and r["ticker"] not in mega:
                 chosen.append(r["ticker"])
+        for t, a in ranked:
+            if len(chosen) >= n:
+                break
+            if t not in chosen:
+                chosen.append(t)
         coll = collisions()
         picks["samples2"] = [{"key": "smp-c-" + t, "kind": "comention", "target": t,
-                              "query": sample_ticker_query(t, coll)} for t in chosen]
+                              "query": sample_ticker_query(t, coll)} for t in chosen[:n]]
         save_run(run)
-        print("stage 2 (co-mentions): %s" % (", ".join(chosen) or "none"))
+        print("stage 2 (co-mentions / leaf checks): %s" % (", ".join(chosen[:n]) or "none"))
         print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
         return
     print("samples already picked; next: record pending samples, then pick-candidates")
@@ -976,7 +1553,7 @@ def cmd_record_error(args):
     run = load_run()
     lg = run["log"]
     key = args.key if args.key.startswith("smp-") else args.key.upper()
-    pending = {k for st in ("groups", "samples", "counts") for k, *_ in pending_calls(run, st)}
+    pending = {k for st in STAGES for k, *_ in pending_calls(run, st)}
     if key not in pending:
         sys.exit("%s is not a pending call (already recorded or skipped?)" % key)
     att = lg["attempts"].setdefault(key, [])
@@ -1027,10 +1604,9 @@ def clean_check_fresh(r, end):
 
 
 def cmd_pick_candidates(args):
+    """Daily exact counts: split leaves, sample candidates, hot re-reads, then core not yet measured today."""
     run = load_run()
     note_reads_left(run, args.reads_left_today)
-    state = load_state()
-    universe = load_universe()
     coll = collisions()
     pend = [k for k, *_ in pending_calls(run, "samples")]
     if pend and not args.force:
@@ -1038,72 +1614,76 @@ def cmd_pick_candidates(args):
     rem = reads_remaining(run)
     spare = min(SPARE, max(1, rem // 15)) if rem > 0 else 0
     slots = max(0, rem - spare)
+    hourly = load_hourly()
+    day = day_of(run["window_end"])
+    mega = set(run["megacaps"])
     core = run["core_order"]
-    core_ind = run["core_individual_planned"]
-    # carryover: last run's strong non-core tickers and risers
-    end = parse_iso(run["window_end"])
-    carry = []
-    for r in state.get("last_run_noncore", []):
-        t = r["ticker"]
-        if t in core or t not in universe:
-            continue
-        if parse_iso(r["window_end"]) < end - timedelta(hours=CARRYOVER_MAX_AGE_HOURS):
-            continue
-        if not clean_check_fresh(r, end):
-            continue   # no recent sample evidence of clean stock chatter -> must be re-discovered
-        if r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS:
-            carry.append((-(1 if r.get("riser") else 0), -r["mentions"], t))
-    carry = [t for *_, t in sorted(carry)][:CARRYOVER_MAX]
+    taken = set(mega) | set(run["counts"])
     agg, _ = analyze_samples(run)
-    disc = sorted(((t, a) for t, a in agg.items()
-                   if t not in core_ind and t not in carry and clean_ok(a)),
-                  key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
-    pool = [(t, "carryover", None) for t in carry] + \
-           [(t, "core" if t in core else "discovered", sorted(a["via"])) for t, a in disc]
-    # demoted core in the hottest groups come back first among the remaining core
-    hot_groups = {p["target"] for p in (run["picks"]["samples1"] or [])}
-    demoted = [t for t in core if t not in core_ind]
-    in_hot = {t for g in run["groups"] if g["key"] in hot_groups for t in g["demoted_core"]}
-    core_rest = sorted(demoted, key=lambda t: (t not in in_hot, core.index(t)))
-    cand_n = min(CANDIDATES, len(pool))
-    core_n = slots - cand_n
-    if core_n < CORE_FLOOR:
-        core_n = min(CORE_FLOOR, slots)
-        cand_n = max(0, min(len(pool), slots - core_n))
-    core_full = core_ind + core_rest
-    core_n = min(core_n, len(core_full))
-    chosen_core = core_full[:core_n]
-    picks, seen = [], set()
-    for t in chosen_core:
-        picks.append({"ticker": t, "tier": "core", "source": "core" if t in core_ind else "core-returned",
-                      "via": None})
-        seen.add(t)
-    for t, tier, via in pool:
-        if len([p for p in picks if p["tier"] != "core" or p["source"] == "discovered"]) >= cand_n:
-            break
-        if t in seen:
+    leaf, sample, hot = [], [], []
+    for nid, node, m in sorted(fresh_frontier(run), key=lambda x: -(node_resid_24h(run, x[0]) or 0)):
+        if len(node["tickers"]) <= LEAF_MAX and (node_resid_24h(run, nid) or 0) >= LEAF_MIN_24H:
+            for t in node["tickers"]:
+                if not measured_today(hourly, t, day):
+                    leaf.append((t, nid))
+    for t, a in sorted(agg.items(), key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0])):
+        if clean_ok(a) and not measured_today(hourly, t, day):
+            sample.append((t, sorted(a["via"])))
+    hot_more = []
+    for t, rec in sorted(hourly["tickers"].items(), key=lambda x: -x[1].get("last_5h", 0)):
+        if t in mega or not measured_today(hourly, t, day) or rec.get("last_window_end") == run["window_end"]:
             continue
-        picks.append({"ticker": t, "tier": "core" if tier == "core" else tier,
-                      "source": "discovered" if tier in ("discovered", "core") else tier, "via": via})
-        seen.add(t)
-    # call order = priority if the budget runs out mid-way: top core, then candidates, then the rest of core
-    head = [p for p in picks if p["tier"] == "core" and p["source"] != "discovered"]
-    rest = [p for p in picks if not (p["tier"] == "core" and p["source"] != "discovered")]
-    picks = head[:20] + rest + head[20:]
+        if rec.get("last_5h", 0) >= HOT_REREAD_5H and len(hot) < HOT_REREAD_MAX:
+            hot.append((t, None))
+        elif rec.get("last_5h", 0) >= HOT_REREAD_5H // 2:
+            hot_more.append((t, None))
+    core_due = [t for t in core if not measured_today(hourly, t, day)]
+    picks = []
+
+    leaf_via = dict(leaf)
+
+    def add(t, source, via):
+        if t in taken or len(picks) >= slots:
+            return
+        if t in leaf_via and source != "split-leaf":
+            source, via = "split-leaf", leaf_via[t]
+        taken.add(t)
+        picks.append({"ticker": t, "tier": "core" if t in core else "discovered", "source": source, "via": via})
+
+    core_min = min(CORE_DAILY_MIN, len(core_due), slots)
+    discover = slots - core_min
+    lists = [("split-leaf", leaf), ("sample", sample), ("hot-reread", hot)]
+    idx = [0, 0, 0]
+    while len(picks) < discover and any(idx[i] < len(l) for i, (_, l) in enumerate(lists)):
+        for i, (src, l) in enumerate(lists):
+            if len(picks) >= discover:
+                break
+            while idx[i] < len(l) and l[idx[i]][0] in taken:
+                idx[i] += 1
+            if idx[i] < len(l):
+                add(l[idx[i]][0], src, l[idx[i]][1])
+                idx[i] += 1
+    for t in core_due:
+        add(t, "core-daily", None)
+    for src, l in lists + [("hot-reread", hot_more)]:
+        for t, via in l:
+            add(t, src, via)
     for p in picks:
         p["collision"] = p["ticker"] in coll
         p["query"] = ticker_query(p["ticker"], coll)
+        run["count_sources"][p["ticker"]] = p["source"]
     run["picks"]["individual"] = picks
     run["spare_reserved"] = spare
     save_run(run)
     by = {}
     for p in picks:
         by[p["source"]] = by.get(p["source"], 0) + 1
-    print("individual counts: %d %s (remaining budget %d, spare %d)" % (len(picks), json.dumps(by), rem, spare))
-    print("discovered (clean authors, clean share):",
-          ", ".join("%s(%d, %.0f%%)" % (t, len(a["authors"]), 100 * a["share"]) for t, a in disc[:30]) or "-")
-    rejected = sorted(((t, a) for t, a in agg.items() if t not in core_ind and t not in carry and not clean_ok(a)
-                       and a["total"] >= MIN_AUTHORS), key=lambda x: -x[1]["total"])
+    print("daily exact counts: %d %s (remaining budget %d, spare %d)" % (len(picks), json.dumps(by), rem, spare))
+    print("split leaves: %s" % (", ".join("%s(%s)" % (t, v) for t, v in leaf[:15]) or "-"))
+    print("sample candidates (clean authors, clean share):",
+          ", ".join("%s(%d, %.0f%%)" % (t, len(agg[t]["authors"]), 100 * agg[t]["share"]) for t, _ in sample[:20]) or "-")
+    rejected = sorted(((t, a) for t, a in agg.items() if not clean_ok(a) and a["total"] >= MIN_AUTHORS
+                       and t not in mega and t not in core), key=lambda x: -x[1]["total"])
     if rejected:
         print("rejected by the clean check:", ", ".join("%s(%d posts, %.0f%% clean, %d authors)"
                                                        % (t, a["total"], 100 * a["share"], len(a["authors"]))
@@ -1122,33 +1702,22 @@ def cmd_next(args):
     print("retries/errors %d of reserve %d (429: %d, other: %d of max %d); skipped: %s"
           % (lg["extra_reads"], RETRY_RESERVE, lg["retries_429"], lg["errors_other"], MAX_OTHER_ERRORS,
              ", ".join(run["skipped"]) or "-"))
-    if run.get("stopped"):
+    print("splits: %d ops, %d of %d split reads planned" % (len(run["splits"]), split_reads_planned(run),
+                                                            run["targets"]["splits"]))
+    kind, payload = next_action(run)
+    save_run(run)
+    if kind == "stop":
         print("STOPPED: %s. %s" % (run["stopped"], stop_advice(run)))
-        return
-    g = pending_calls(run, "groups")
-    if g:
-        print("NEXT: group counts pending (%d): %s  -> next-call / record, ONE call at a time"
-              % (len(g), " ".join(k for k, *_ in g)))
-        return
-    if run["picks"]["samples1"] is None:
-        print("NEXT: pick-samples (stage 1)")
-        return
-    s = pending_calls(run, "samples")
-    if s:
-        print("NEXT: samples pending: %s  -> next-call / record-sample, ONE call at a time" % " ".join(k for k, *_ in s))
-        return
-    if run["picks"]["samples2"] is None:
-        print("NEXT: pick-samples (stage 2)")
-        return
-    if run["picks"]["individual"] is None:
-        print("NEXT: pick-candidates")
-        return
-    c = pending_calls(run, "counts")
-    if c:
-        print("NEXT: individual counts pending (%d): %s  -> next-call / record, ONE call at a time"
-              % (len(c), " ".join(k for k, *_ in c)))
-        return
-    print("NEXT: build")
+    elif kind == "call":
+        stage, calls = payload
+        print("NEXT: %s calls pending (%d), next %s  -> `next-call` prints it; ONE call at a time"
+              % (stage, len(calls), calls[0][0]))
+    elif kind == "pick-samples":
+        print("NEXT: python3 scripts/build_rankings.py pick-samples   (%s)" % payload)
+    elif kind == "pick-candidates":
+        print("NEXT: python3 scripts/build_rankings.py pick-candidates")
+    else:
+        print("NEXT: python3 scripts/build_rankings.py build")
 
 
 # --- build -------------------------------------------------------------------
@@ -1168,10 +1737,13 @@ def cmd_build(args):
         if not ok:
             sys.exit("cannot build: run incomplete and not publishable as partial (%s). "
                      "Archive it with: python3 scripts/build_rankings.py abandon --reason '...'" % why)
-        missing = [k for st in ("samples", "counts") for k, *_ in pending_calls(run, st)] + list(run["skipped"])
+        missing = [k for st in ("splits", "samples", "counts") for k, *_ in pending_calls(run, st)] + list(run["skipped"])
         partial_reason = "%s; not measured: %s" % (run.get("stopped") or "run ended early",
                                                    ", ".join(missing) or "-")
-    picks = run["picks"]["individual"] or []
+    coll = collisions()
+    picks = [{"ticker": t, "tier": "core", "source": "megacap", "collision": t in coll,
+              "query": ticker_query(t, coll), "via": None} for t in run["megacaps"]]
+    picks += run["picks"]["individual"] or []
     measured = [p for p in picks if p["ticker"] in run["counts"]]
     if not measured:
         sys.exit("no individual counts recorded")
@@ -1180,6 +1752,10 @@ def cmd_build(args):
     state = load_state()
     now = utcnow()
     agg, sstats = analyze_samples(run)
+    hourly = load_hourly()
+    update_hourly(run, hourly, agg, now)
+    day = day_of(run["window_end"])
+    pooled = hourly["seen"].get(day, {})
 
     entries = []
     for p in measured:
@@ -1211,6 +1787,7 @@ def cmd_build(args):
             "burst_hours": [hour_iso(run, i) for i in m["burst_idx"]],
             "rank_score": m["adjusted"],
             "hourly": c["buckets"][-WINDOW_HOURS:],
+            "last_measured": c["recorded_at"],
         }
         if p["collision"]:
             e["query"] = p["query"]
@@ -1233,6 +1810,10 @@ def cmd_build(args):
                                                                                  len(a["authors"]))
             elif a and clean_ok(a):
                 e["_clean_checked_at"] = run["window_end"]
+            elif t in pooled and clean_ok({"authors": set(pooled[t]["authors"]), "total": pooled[t]["total"],
+                                           "share": pooled[t]["clean"] / max(1, pooled[t]["total"])}):
+                e["_clean_checked_at"] = run["window_end"]
+                labels.append("clean-check-pooled-today")
             elif prev and parse_iso(prev) >= parse_iso(run["window_end"]) - timedelta(hours=CLEAN_CHECK_MAX_AGE_HOURS):
                 e["_clean_checked_at"] = prev
                 labels.append("clean-check-carried")
@@ -1284,11 +1865,25 @@ def cmd_build(args):
     times = sorted(c["recorded_at"] for c in run["counts"].values())
     n_groups = sum(1 for g in run["groups"] if g["key"] in run["counts"])
     n_ind = len(measured)
+    n_mega = sum(1 for p in measured if p["source"] == "megacap")
+    n_split = sum(1 for op in run["splits"] for k in op["measure"] if k in run["counts"])
     n_smp = len(run["samples"])
     extra = int(run["log"].get("extra_reads", 0))
     not_measured = [p["ticker"] for p in picks if p["ticker"] not in run["counts"]]
-    not_measured += [t for t in run["core_order"] if t not in {p["ticker"] for p in picks}
-                     and not any(t in g["tickers"] for g in stock_groups)]
+    split_out = []
+    for op in run["splits"]:
+        split_out.append({"node": op["node"], "parent_posts_24h": op.get("parent_24h"),
+                          "parts": [{"node": k, "size": len(run["tree"]["nodes"][k]["tickers"]),
+                                     "first": run["tree"]["nodes"][k]["tickers"][0],
+                                     "last": run["tree"]["nodes"][k]["tickers"][-1],
+                                     "mentions": (sum(run["counts"][k]["buckets"][-WINDOW_HOURS:])
+                                                  if k in run["counts"] else None),
+                                     "posts_24h": (sum(run["counts"][k]["buckets"][-24:])
+                                                   if k in run["counts"] else None),
+                                     "subtracted": bool(run["counts"].get(k, {}).get("inferred"))}
+                                    for k in op["children"]],
+                          "overlap_excess": op.get("overlap_excess"), "overlap_warning": op.get("overlap_warning", False),
+                          "infer_failed": op.get("infer_failed")})
     coll_terms = suffix()
     out = {
         "generated_at": iso(now),
@@ -1316,8 +1911,10 @@ def cmd_build(args):
         "measured_from": times[0],
         "measured_until": times[-1],
         "planned_not_measured": not_measured,
-        "x_reads_used": n_groups + n_smp + n_ind + extra,
-        "x_reads_breakdown": {"group_counts": n_groups, "samples": n_smp, "individual_counts": n_ind,
+        "x_reads_used": n_groups + n_split + n_smp + n_ind + extra,
+        "x_reads_breakdown": {"group_counts": n_groups, "split_counts": n_split, "samples": n_smp,
+                              "individual_counts": n_ind, "megacap_counts": n_mega,
+                              "daily_counts": n_ind - n_mega,
                               "extra_errors_retries": extra,
                               "retries_429": int(run["log"].get("retries_429", 0)),
                               "errors_other": int(run["log"].get("errors_other", 0))},
@@ -1334,6 +1931,7 @@ def cmd_build(args):
             "stock_groups": len(stock_groups),
             "stock_tickers_screened": sum(g["size"] for g in stock_groups),
             "demoted_core_in_sweep": [t for g in stock_groups for t in g["demoted_core"]],
+            "megacaps_counted_individually": run["megacaps"],
             "etf_groups_this_run": [g["key"] for g in etf_groups],
             "etf_groups_total": run["etf_groups_total"],
             "etf_tickers_total": run["etf_tickers_total"],
@@ -1343,6 +1941,18 @@ def cmd_build(args):
                      "several of them counts once), with the spam filter applied. It is an upper bound for "
                      "every member, so a quiet group means all its tickers are quiet."),
             "groups": gsum,
+        },
+        "adaptive_splits": {
+            "rule": ("each run, the unsplit node with the most posts in the last 24h (>= %d) is split into 4 "
+                     "contiguous parts; if the node was counted in this run, 3 parts are counted and the 4th is "
+                     "parent minus the 3 (per hour, >= 0; an under-estimate when posts mention tickers of "
+                     "several parts), else all 4 are counted; nodes with <= %d tickers are leaves whose members "
+                     "get exact daily counts; the tree persists in data/splits.json (pruned after %dh without a "
+                     "count, cold splits collapsed)" % (SPLIT_MIN_24H, LEAF_MAX, NODE_MAX_AGE_HOURS)),
+            "reads": n_split,
+            "nodes_after_run": len(run["tree"]["nodes"]),
+            "prune_notes": run.get("tree_prune_notes", []),
+            "splits": split_out,
         },
         "sampling": {
             "sort_order": "relevancy", "max_results": SAMPLE_MAX_RESULTS,
@@ -1384,13 +1994,44 @@ def cmd_build(args):
             "fetched_at": umeta.get("fetched_at"),
         },
         "cadence": "every 5 hours",
+        "freshness": ("every ranked ticker was counted individually in THIS run (last_measured = time of its "
+                      "count; all over the same UTC window). Tickers measured in earlier runs today are in "
+                      "data/today.json, not here."),
         "note": (("PARTIAL RUN (%s). " % partial_reason if partial_reason else "") +
-                 "Ranks the tickers counted individually in this run (core + carryover + tickers discovered "
-                 "via the group sweep and samples), all over the same UTC window. The whole non-core stock "
-                 "universe is screened at group level every run, but a ticker is only ranked if it was "
-                 "counted individually; discovery is sampled, so a busy ticker can still be missed."),
+                 "Ranks the tickers counted individually in this run: the megacaps (every run) plus this run's "
+                 "exact daily counts (split leaves, sample discoveries, hot re-reads, core due today), all over "
+                 "the same UTC window. The whole stock universe is screened at group level every run and hot "
+                 "groups are split adaptively, but a ticker is only ranked if it was counted individually. "
+                 "The daily view of everything seen today is data/today.json."),
         "rankings": rankings,
     }
+    # persistent split tree: update counts of every node measured in this run; fail closed
+    tree = run["tree"]
+    for nid, n in tree["nodes"].items():
+        c = run["counts"].get(nid)
+        if c:
+            n["count_24h"] = sum(c["buckets"][-24:])
+            n["count_5h"] = sum(c["buckets"][-WINDOW_HOURS:])
+            n["measured_at"] = c["recorded_at"]
+            n["window_end"] = run["window_end"]
+            n["inferred"] = bool(c.get("inferred"))
+    try:
+        validate_tree(tree)
+        out["adaptive_splits"]["state"] = "saved"
+    except SplitStateError as e:
+        tree = empty_tree()
+        out["adaptive_splits"]["state"] = "RESET (inconsistent: %s)" % e
+        print("WARNING: split state inconsistent (%s); data/splits.json reset to an empty tree" % e)
+    write_json(SPLITS_JSON, tree)
+    write_json(HOURLY_JSON, hourly, compact=True)
+    mega_all = set(megacap_list())
+    core_all = set(core_list())
+    through = parse_iso(run["window_end"])
+    today_entries = write_daily(hourly, day, through, universe, core_all, mega_all, TODAY_JSON, now)
+    prev_day = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    if any(day_of(w) == prev_day for w in hourly["windows"]):
+        write_daily(hourly, prev_day, through, universe, core_all, mega_all,
+                    os.path.join(DAILY_DIR, prev_day + ".json"), now)
     write_json(LATEST_JSON, out)
     hist = os.path.join(HISTORY_DIR, now.strftime("%Y-%m-%dT%H%MZ") + ".json")
     write_json(hist, out)
@@ -1429,26 +2070,28 @@ def cmd_build(args):
     print("wrote %s and %s: %d ranked, %d risers, reads %s, planned-not-measured %d"
           % (os.path.relpath(LATEST_JSON, ROOT), os.path.relpath(hist, ROOT), len(rankings), len(risers_out),
              json.dumps(out["x_reads_breakdown"]), len(not_measured)))
+    print("today.json: %d tickers seen on %s (%d exact, %d partial, %d bounded, %d seen-only)"
+          % (len(today_entries), day, *[sum(1 for e in today_entries if e["status"] == k)
+                                        for k in ("exact", "partial", "bounded", "seen")]))
     print("top 10:", ", ".join("%s %d%s" % (r["ticker"], r["mentions"], "*" if r["burst"] else "") for r in rankings[:10]))
     print("risers:", ", ".join("%s %d (x%.1f/x%.1f)" % (r["ticker"], r["mentions"], r["momentum_5h_vs_prev_day"] or 0,
                                                        r["momentum_last_hour_vs_prev_9h"]) for r in risers_out[:10]) or "-")
 
 
 def write_next(state, now):
-    core = core_priority(state)
-    carry = [r["ticker"] for r in state.get("last_run_noncore", [])
-             if (r.get("riser") or r["mentions"] >= CARRYOVER_MIN_MENTIONS) and r.get("clean_checked_at")][:CARRYOVER_MAX]
+    mega = megacap_list()
+    core = [t for t in core_priority(state) if t not in mega]
     write_json(NEXT_JSON, {
         "generated_at": iso(now),
         "method": METHOD,
-        "note": ("Expected individual counts of the next run: core (strongest first; the weakest go into the "
-                 "group sweep) and carryover. Discovered tickers are only known during the run. "
-                 "Recomputed by `plan`/`pick-candidates` at run time."),
+        "note": ("Expected individual counts of the next run: the megacaps (every run). Everything else, "
+                 "including the rest of the core, is screened in the group sweep and gets one exact daily "
+                 "count per UTC day (split leaves, sample discoveries, hot re-reads, core due today), "
+                 "chosen by `pick-candidates` at run time."),
         "query_pattern": BASE_QUERY,
-        "count": len(core[:CORE_INDIVIDUAL]) + len(carry),
-        "tickers": [{"ticker": t, "tier": "core"} for t in core[:CORE_INDIVIDUAL]] +
-                   [{"ticker": t, "tier": "carryover"} for t in carry],
-        "core_in_group_sweep": core[CORE_INDIVIDUAL:],
+        "count": len(mega),
+        "tickers": [{"ticker": t, "tier": "core", "source": "megacap"} for t in mega],
+        "core_in_group_sweep": core,
         "etf_rotation_next": state.get("etf_rotation_next", 0),
     })
 
@@ -1471,15 +2114,9 @@ def cmd_migrate(args):
 # --- offline checks ----------------------------------------------------------
 def cmd_check(args):
     universe = load_universe()
-    exclude = set(read_list("exclude_tickers.txt"))
-    state = load_state()
-    core = core_priority(state)
-    cs = set(core)
-    stock_nc = sorted(t for t, r in universe.items() if r["asset_type"] == "Stock" and t not in cs and t not in exclude)
-    etf_nc = sorted(t for t, r in universe.items() if r["asset_type"] == "ETF" and t not in cs and t not in exclude)
     problems = []
-    for name, tick in (("stock", sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:]))), ("etf", etf_nc)):
-        groups = pack(tick)
+    stock_groups, etf_groups, stock_t, etf_t = current_packing(universe)
+    for name, tick, groups in (("stock", stock_t, stock_groups), ("etf", etf_t, etf_groups)):
         flat = [t for g in groups for t in g]
         if flat != tick:
             problems.append("%s packing does not reproduce the ticker list" % name)
@@ -1493,17 +2130,29 @@ def cmd_check(args):
         print("%s: %d tickers in %d groups (sizes %s..%s, longest query %d chars)"
               % (name, len(tick), len(groups), min(map(len, groups)), max(map(len, groups)),
                  max(len(group_query(g)) for g in groups)))
-    if not set(stock_nc) <= set(t for g in pack(sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:]))) for t in g):
-        problems.append("a non-core stock is missing from the sweep")
+    mega = megacap_list()
+    missing = [t for t in mega if t not in universe]
+    if missing:
+        problems.append("megacaps not in the universe: %s" % ",".join(missing))
+    core = core_list()
+    swept = set(stock_t) | set(etf_t)
+    lost = [t for t in core if t not in swept and t not in mega and t in universe]
+    if lost:
+        problems.append("core tickers neither megacap nor swept: %s" % ",".join(lost))
     coll = collisions()
     for t, extra in coll.items():
         q = ticker_query(t, coll)
         if len(q) > MAX_QUERY_LEN or q.count('"') % 2:
             problems.append("collision query for %s is invalid: %s" % (t, q))
+    try:
+        tree = load_tree()
+        print("split state: %d nodes, valid" % len(tree["nodes"]))
+    except SplitStateError as e:
+        problems.append("split state inconsistent: %s" % e)
     print("suffix (%d chars): %s" % (len(suffix()), suffix()))
-    print("collisions: %d (in universe: %d); spam accounts: %d; core: %d"
-          % (len(coll), sum(1 for t in coll if t in universe), len(spam_accounts()), len(core)))
-    t, ok = size_run(RUN_READS, len(pack(sorted(set(stock_nc) | set(core[CORE_INDIVIDUAL:])))), len(pack(etf_nc)))
+    print("collisions: %d (in universe: %d); spam accounts: %d; core: %d; megacaps: %s"
+          % (len(coll), sum(1 for t in coll if t in universe), len(spam_accounts()), len(core), " ".join(mega)))
+    t, ok = size_run(RUN_READS, len(stock_groups), len(etf_groups))
     print("default split of %d reads: %s (sum %d)" % (RUN_READS, json.dumps(t), sum(t.values())))
     for p in problems:
         print("PROBLEM:", p)
@@ -1520,7 +2169,7 @@ def main():
     p.add_argument("--now", help="override current UTC time (YYYY-MM-DDTHH:MM:SSZ)")
     p.add_argument("--reads-left-today", type=int)
     p = sub.add_parser("calls", help="print exact x tool arguments for pending calls of a stage")
-    p.add_argument("stage", choices=["groups", "samples", "counts"])
+    p.add_argument("stage", choices=list(STAGES))
     p.add_argument("key", nargs="*")
     p.add_argument("--all", action="store_true", help="list all pending calls (review only; never batch them)")
     p = sub.add_parser("record", help="record counts: KEY=TOTAL:b1,b2,...,b29 (29 hourly buckets, oldest first)")
@@ -1554,12 +2203,14 @@ def main():
     p.add_argument("--extra-reads", type=int, default=0)
     sub.add_parser("check", help="offline self-checks")
     sub.add_parser("migrate", help="migrate state.json/next_tickers.json from the old method")
+    sub.add_parser("splits-reset", help="reset data/splits.json to an empty tree (after a fail-closed error)")
     args = ap.parse_args()
     {"universe": cmd_universe, "plan": cmd_plan, "calls": cmd_calls, "record": cmd_record,
      "pick-samples": cmd_pick_samples, "record-sample": cmd_record_sample,
      "pick-candidates": cmd_pick_candidates, "next": cmd_next, "status": cmd_next,
      "record-error": cmd_record_error, "next-call": cmd_next_call, "abandon": cmd_abandon,
-     "build": cmd_build, "check": cmd_check, "migrate": cmd_migrate}[args.cmd](args)
+     "build": cmd_build, "check": cmd_check, "migrate": cmd_migrate,
+     "splits-reset": cmd_splits_reset}[args.cmd](args)
 
 
 if __name__ == "__main__":

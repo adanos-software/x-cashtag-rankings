@@ -1,6 +1,7 @@
 """Offline checks for scripts/build_rankings.py (no X reads). Run: python3 -m unittest discover tests"""
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -66,23 +67,25 @@ class Packing(unittest.TestCase):
 
 class Budget(unittest.TestCase):
     def test_default_split(self):
-        t, ok = br.size_run(95, 12, 13)
+        t, ok = br.size_run(95, 13, 14)
         self.assertTrue(ok)
-        self.assertEqual(t, {"stock_groups": 12, "etf_groups": 2, "samples": 6, "candidates": 20, "core": 50, "spare": 5})
+        self.assertEqual(t, {"stock_groups": 13, "megacaps": 10, "etf_groups": 3, "splits": 24, "samples": 10,
+                             "spare": 4, "dailies": 31})
 
-    def test_core_shrinks_first(self):
-        t, ok = br.size_run(60, 12, 13)
-        self.assertEqual((t["core"], t["etf_groups"], t["candidates"], t["samples"]), (15, 2, 20, 6))
-        t, ok = br.size_run(40, 12, 13)
-        self.assertEqual(t["core"], 10)
+    def test_dailies_then_splits_shrink_first(self):
+        t, ok = br.size_run(70, 13, 14)
+        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (10, 20, 10, 10))
+        self.assertEqual(sum(t.values()), 70)
+        t, ok = br.size_run(40, 13, 14)
         self.assertEqual(sum(t.values()), 40)
+        self.assertEqual(t["megacaps"], 10)
 
     def test_minimum(self):
-        t, ok = br.size_run(20, 12, 13)
+        t, ok = br.size_run(20, 13, 14)
         self.assertTrue(ok)
         self.assertEqual(sum(t.values()), 20)
-        self.assertEqual(t["stock_groups"], 12)
-        t, ok = br.size_run(11, 12, 13)
+        self.assertEqual(t["stock_groups"], 13)
+        t, ok = br.size_run(12, 13, 14)
         self.assertFalse(ok)
 
     def test_plan_skips_when_under_daily_cap(self):
@@ -99,8 +102,11 @@ class Budget(unittest.TestCase):
         self.assertEqual(plan["window_start"], "2026-10-08T09:00:00Z")
         self.assertEqual(plan["history_start"], "2026-10-07T09:00:00Z")
         swept = {t for g in plan["groups"] if g["kind"] == "stock" for t in g["tickers"]}
-        for t in plan["core_order"][plan["targets"]["core"]:]:
-            self.assertIn(t, swept)          # demoted core stays screened
+        for t in plan["core_order"]:
+            if br.load_universe().get(t, {}).get("asset_type") == "Stock":
+                self.assertIn(t, swept)          # the core (minus megacaps) is folded into the sweep
+        for t in plan["megacaps"]:
+            self.assertNotIn(t, swept)
 
 
 class Metrics(unittest.TestCase):
@@ -253,7 +259,7 @@ class Migration(unittest.TestCase):
         r = run("migrate")
         self.assertEqual(r.returncode, 0, r.stderr)
         s = json.load(open(p))
-        self.assertEqual(s["method_version"], 2)
+        self.assertEqual(s["method_version"], br.METHOD_VERSION)
         self.assertTrue(s["last_run_noncore"])   # seeded from the v1 latest.json
 
     def test_check_command(self):
@@ -269,8 +275,20 @@ def runjson():
     return json.load(open(os.path.join(TMP, "work", "run.json")))
 
 
+def reset_data():
+    for f in ("splits.json", "hourly.json", "today.json"):
+        p = os.path.join(TMP, "data", f)
+        if os.path.exists(p):
+            os.remove(p)
+    shutil.rmtree(os.path.join(TMP, "data", "daily"), ignore_errors=True)
+    shutil.copy(os.path.join(REPO, "data", "state.json"), os.path.join(TMP, "data", "state.json"))
+
+
 class RunFlow(unittest.TestCase):
     """Sequential-run mechanics: one call at a time, 429 handling, stop rules, partial build, archive."""
+
+    def setUp(self):
+        reset_data()
 
     def plan(self, left="900"):
         r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", left)
@@ -343,92 +361,6 @@ class RunFlow(unittest.TestCase):
         r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", "425")
         self.assertEqual(r.returncode, 3)
 
-    def test_partial_build_and_refusal(self):
-        self.plan()
-        self.record_groups(skip=("S12",))
-        r = run("build")
-        self.assertNotEqual(r.returncode, 0)          # nothing picked yet
-        self.record_groups()
-        self.do_samples()
-        r = run("pick-candidates")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        picks = runjson()["picks"]["individual"]
-        core = [p["ticker"] for p in picks if p["source"] == "core"]
-        rest = [p["ticker"] for p in picks if p["source"] != "core"]
-        self.assertTrue(rest)
-        run("record", *["%s=%s" % (t, Z29) for t in core[:-1]], "--no-sleep")
-        r = run("build")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("core not fully counted", r.stderr)
-        run("record", "%s=%s" % (core[-1], Z29), "--no-sleep")
-        r = run("build")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("PARTIAL build", r.stdout)
-        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
-        self.assertTrue(out["partial"])
-        self.assertTrue(out["note"].startswith("PARTIAL RUN"))
-        self.assertIn(rest[0], out["partial_reason"])
-        self.assertIn(rest[0], out["planned_not_measured"])
-        self.assertEqual(out["ranked_count"], len(core))
-        # next plan archives the built run
-        self.plan()
-        arch = os.listdir(os.path.join(TMP, "work", "archive"))
-        self.assertTrue(any(a.endswith("-built") for a in arch))
-
-    def test_complete_build_not_partial(self):
-        self.plan()
-        self.record_groups()
-        self.do_samples()
-        run("pick-candidates")
-        picks = runjson()["picks"]["individual"]
-        run("record", *["%s=%s" % (p["ticker"], Z29) for p in picks], "--no-sleep")
-        r = run("build")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
-        self.assertFalse(out["partial"])
-        self.assertIsNone(out["partial_reason"])
-
-    def test_clean_gate_in_flow(self):
-        """TM-style memecoin/template chatter is not discovered; a real mover with clean posts is;
-        a carryover ticker whose sample is spam is held back instead of ranked."""
-        st = json.load(open(os.path.join(TMP, "data", "state.json")))
-        st["last_run_noncore"] = [{"ticker": "DKI", "mentions": 300, "window_end": "2026-10-09T04:00:00Z",
-                                   "riser": True, "clean_checked_at": "2026-10-09T04:00:00Z"}]
-        json.dump(st, open(os.path.join(TMP, "data", "state.json"), "w"))
-        self.plan()
-        self.record_groups()
-        run("pick-samples")
-        lines = os.path.join(TMP, "lines.txt")
-        posts = ["memeguru%d\t%dx profit from my call on $TM https://t.co/x" % (i, 20 + i) for i in range(6)]
-        posts += ["solmaster%d\tDecent %dx profit pump up on $TM private TG friends printing" % (i, i) for i in range(4)]
-        posts += ["trader0\t$IPW breaking out on volume after the contract news",
-                  "trader1\tadded some $IPW here, the chart finally cleared resistance today",
-                  "trader2\t$IPW premarket looks strong, curious whether it holds the open",
-                  "trader3\tnot chasing $IPW at these levels but the story is real"]
-        posts += ["dumper%d\t$DKI $AAA $BBB $CCC top gainers" % i for i in range(5)]
-        open(lines, "w").write("\n".join(posts) + "\n")
-        for p in runjson()["picks"]["samples1"]:
-            run("record-sample", p["key"], "--lines", lines, "--no-sleep")
-        run("pick-samples")
-        for p in runjson()["picks"]["samples2"] or []:
-            run("record-sample", p["key"], "--failed", "--no-sleep")
-        r = run("pick-candidates")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        picks = {p["ticker"]: p for p in runjson()["picks"]["individual"]}
-        self.assertNotIn("TM", picks)
-        self.assertEqual(picks["IPW"]["source"], "discovered")
-        self.assertEqual(picks["DKI"]["source"], "carryover")
-        self.assertTrue(picks["IPW"]["query"].endswith(br.suffix()))
-        run("record", *["%s=%s" % (t, Z29) for t in picks], "--no-sleep")
-        r = run("build")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        out = json.load(open(os.path.join(TMP, "data", "latest.json")))
-        ranked = {e["ticker"] for e in out["rankings"]}
-        self.assertIn("IPW", ranked)
-        self.assertNotIn("DKI", ranked)
-        self.assertEqual([h["ticker"] for h in out["held_back"]], ["DKI"])
-        self.assertIn("TM", out["sampling"]["rejected_by_clean_check"])
-
     def test_abandon_archives(self):
         self.plan()
         os.makedirs(os.path.join(TMP, "work", "samples"), exist_ok=True)
@@ -439,6 +371,273 @@ class RunFlow(unittest.TestCase):
         self.assertTrue(arch)
         a = json.load(open(os.path.join(TMP, "work", "archive", arch[-1], "run.json")))
         self.assertEqual(a["abandoned"]["reason"], "test")
+
+
+class NS(dict):
+    __getattr__ = dict.get
+
+
+class Sim:
+    """Fake X: per-ticker hourly series; a group/node count is the sum over its members (overlap: posts
+    that mention two given tickers at once, counted once in a union)."""
+
+    def __init__(self, series, clean_posts=(), spam_posts=(), overlap=None):
+        self.series = series
+        self.clean = set(clean_posts)
+        self.spam = set(spam_posts)
+        self.overlap = overlap or {}      # (A, B) -> per-hour posts mentioning both
+        self.reads = 0
+
+    def tickers(self, q):
+        return re.findall(r"\$([A-Z]+)", q.split(" -is:retweet")[0])
+
+    def count(self, q):
+        self.reads += 1
+        tk = self.tickers(q)
+        b = [0] * 29
+        for t in tk:
+            for i, v in enumerate(self.series.get(t, [0] * 29)):
+                b[i] += v
+        for (x, y), per_h in self.overlap.items():
+            if x in tk and y in tk:
+                b = [max(0, v - per_h) for v in b]
+        return b
+
+    def posts(self, q):
+        self.reads += 1
+        out = []
+        for t in self.tickers(q):
+            if t in self.clean:
+                notes = ["the chart finally cleared resistance on volume", "earnings call tomorrow, holding into it",
+                         "guidance raise looks real, adding on dips", "short interest is high, watching the open",
+                         "new contract announced this morning, big if true"]
+                out += ["trader%s%d\tadded more $%s today, %s" % (t, i, t, notes[i]) for i in range(5)]
+            if t in self.spam:
+                out += ["memeguru%d\t%dx profit from my call on $%s https://t.co/x" % (i, 20 + i, t) for i in range(6)]
+        return out[:25]
+
+
+def drive(sim, now, left=900, until=None, max_steps=500):
+    import contextlib
+    import io as _io
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        br.cmd_plan(NS(now=now, reads_left_today=left))
+        for _ in range(max_steps):
+            r = br.load_run()
+            kind, payload = br.next_action(r)
+            br.save_run(r)
+            if kind == until:
+                return kind
+            if kind == "call":
+                stage, calls = payload
+                key, tool, a = calls[0]
+                if tool == "get_posts_counts_recent":
+                    b = sim.count(a["query"])
+                    br.cmd_record(NS(pairs=["%s=%d:%s" % (key, sum(b), ",".join(map(str, b)))], no_sleep=True,
+                                     extra_reads=0))
+                else:
+                    lines = sim.posts(a["query"])
+                    f = os.path.join(TMP, "lines.txt")
+                    open(f, "w").write("\n".join(lines) + "\n")
+                    br.cmd_record_sample(NS(key=key, lines=f if lines else None, failed=not lines, no_sleep=True))
+            elif kind == "pick-samples":
+                br.cmd_pick_samples(NS())
+            elif kind == "pick-candidates":
+                br.cmd_pick_candidates(NS())
+            elif kind == "build":
+                br.cmd_build(NS(extra_reads=0))
+                return "built"
+            else:
+                return kind
+    raise AssertionError("run did not finish")
+
+
+def latest():
+    return json.load(open(os.path.join(TMP, "data", "latest.json")))
+
+
+def today():
+    return json.load(open(os.path.join(TMP, "data", "today.json")))
+
+
+class SplitFlow(unittest.TestCase):
+    def setUp(self):
+        reset_data()
+        u = br.load_universe()
+        core = set(br.core_list())
+        stocks = sorted(t for t, r in u.items() if r["asset_type"] == "Stock" and t not in core
+                        and t not in set(br.read_list("exclude_tickers.txt")) and t not in br.collisions())
+        self.hot = stocks[len(stocks) // 3]          # a non-core stock in the middle of some group
+        self.warm = stocks[2 * len(stocks) // 3]
+        self.series = {self.hot: [2] * 24 + [10, 20, 30, 40, 50], self.warm: [3] * 29, "NVDA": [60] * 29}
+
+    def test_splits_drill_down_and_subtract(self):
+        sim = Sim(self.series, clean_posts=[self.hot])
+        self.assertEqual(drive(sim, "2026-10-09T09:14:00Z"), "built")
+        rj = runjson()
+        out = latest()
+        self.assertLessEqual(sim.reads, 95)
+        self.assertEqual(out["x_reads_used"], sim.reads)
+        self.assertEqual(out["x_reads_breakdown"]["split_counts"], br.split_reads_planned(rj))
+        self.assertLessEqual(br.split_reads_planned(rj), 24)
+        # drilled down to a leaf containing the hot ticker, which got an exact count and is ranked
+        picks = {p["ticker"]: p for p in rj["picks"]["individual"]}
+        self.assertEqual(picks[self.hot]["source"], "split-leaf")
+        ranked = {e["ticker"]: e for e in out["rankings"]}
+        self.assertEqual(ranked[self.hot]["mentions"], 150)
+        self.assertIn("last_measured", ranked[self.hot])
+        # subtraction: inferred parts equal the truth when posts do not overlap
+        for op in rj["splits"]:
+            if op.get("infer") and op.get("inferred_done") and not op.get("infer_failed"):
+                inf = rj["counts"][op["infer"]]["buckets"]
+                self.assertEqual(inf, sim.count(br.group_query(rj["tree"]["nodes"][op["infer"]]["tickers"])))
+        # persistent tree saved and valid
+        tree = json.load(open(os.path.join(TMP, "data", "splits.json")))
+        br.validate_tree(tree)
+        self.assertGreater(len(tree["nodes"]), 27)
+        # daily aggregate
+        td = {e["ticker"]: e for e in today()["tickers"]}
+        self.assertEqual(td[self.hot]["status"], "exact")
+        self.assertEqual(td[self.hot]["count"], sum(self.series[self.hot][-9:]))   # 00:00-09:00 UTC
+        self.assertFalse(td[self.hot]["held_back"])
+        self.assertIn("2026-10-09T09:00:00Z", td[self.hot]["windows_5h"])
+        self.assertEqual(td["NVDA"]["tier"], "megacap")
+
+    def test_tree_persists_then_prunes(self):
+        sim = Sim(self.series, clean_posts=[self.hot])
+        drive(sim, "2026-10-09T09:14:00Z")
+        n1 = len(json.load(open(os.path.join(TMP, "data", "splits.json")))["nodes"])
+        sim2 = Sim(self.series, clean_posts=[self.hot])
+        drive(sim2, "2026-10-09T14:14:00Z", until="pick-samples")
+        rj = runjson()
+        # carried-over nodes are stale: splitting one costs 4 reads, a fresh root 3
+        self.assertGreaterEqual(len(rj["tree"]["nodes"]), n1)
+        self.assertLessEqual(br.split_reads_planned(rj), 24)
+        for op in rj["splits"]:
+            fresh = op["node"] in rj["counts"] and not rj["counts"][op["node"]].get("inferred")
+            self.assertEqual(len(op["measure"]), 3 if fresh else 4)
+        br.archive_run("test")
+        # 2 days later nothing was re-measured -> pruned back to the roots
+        import contextlib
+        import io as _io
+        with contextlib.redirect_stdout(_io.StringIO()):
+            br.cmd_plan(NS(now="2026-10-11T14:14:00Z", reads_left_today=900))
+        rj = runjson()
+        self.assertTrue(all(n["parent"] is None for n in rj["tree"]["nodes"].values()))
+        self.assertTrue(rj["tree_prune_notes"])
+
+    def test_next_and_next_call_name_the_split_part(self):
+        run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", "900")
+        hot = ",".join(["10"] * 24 + ["200"] * 5)
+        for g in runjson()["groups"]:
+            run("record", "%s=%s" % (g["key"], hot if g["key"] == "S03" else Z29), "--no-sleep")
+        for t in runjson()["megacaps"]:
+            run("record", "%s=%s" % (t, Z29), "--no-sleep")
+        r = run("next-call")
+        self.assertEqual(r.stdout.count("## "), 1)
+        self.assertIn("## S03.1 ", r.stdout)
+        self.assertIn("record S03.1=", r.stdout)
+        run("record", "S03.1=" + hot, "--no-sleep")
+        self.assertIn("splits calls pending (2), next S03.2", run("next").stdout)
+        self.assertNotEqual(run("record", "S03.1=" + hot, "--no-sleep").returncode, 0)   # no double record
+        self.assertNotEqual(run("record", "S09.1=" + hot, "--no-sleep").returncode, 0)   # not a planned part
+
+    def test_fail_closed_on_inconsistent_split_state(self):
+        drive(Sim(self.series, clean_posts=[self.hot]), "2026-10-09T09:14:00Z")
+        p = os.path.join(TMP, "data", "splits.json")
+        tree = json.load(open(p))
+        child = next(k for k, n in tree["nodes"].items() if n["parent"])
+        tree["nodes"][child]["tickers"] = tree["nodes"][child]["tickers"][1:]    # breaks the partition
+        json.dump(tree, open(p, "w"))
+        r = run("plan", "--now", "2026-10-09T14:14:00Z", "--reads-left-today", "900")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("fail-closed", r.stdout)
+        self.assertEqual(run("check").returncode, 1)
+        self.assertEqual(run("splits-reset").returncode, 0)
+        r = run("plan", "--now", "2026-10-09T14:14:00Z", "--reads-left-today", "900")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_hot_reread_and_partial_day_bounds(self):
+        drive(Sim(self.series, clean_posts=[self.hot]), "2026-10-09T09:14:00Z")
+        first = {p["ticker"] for p in runjson()["picks"]["individual"]}
+        later = dict(self.series)
+        later[self.hot] = [2] * 19 + [10, 20, 30, 40, 50] + [50] * 5
+        drive(Sim(later, clean_posts=[self.hot]), "2026-10-09T14:14:00Z")
+        picks = {p["ticker"]: p for p in runjson()["picks"]["individual"]}
+        self.assertEqual(picks[self.hot]["source"], "hot-reread")
+        quiet = [t for t in first if t != self.hot and t not in picks]
+        self.assertTrue(quiet)                         # measured once today, quiet -> not re-read
+        td = {e["ticker"]: e for e in today()["tickers"]}
+        self.assertEqual(td[self.hot]["status"], "exact")
+        e = td[quiet[0]]
+        self.assertEqual(e["status"], "partial")
+        self.assertEqual(e["exact_hours"], 9)
+        self.assertIsNotNone(e["upper_bound"])         # remaining hours bounded by its group/node
+        self.assertGreaterEqual(e["upper_bound"], e["exact_part"])
+
+    def test_partial_build_needs_sweep_and_megacaps(self):
+        sim = Sim(self.series)
+        self.assertEqual(drive(sim, "2026-10-09T09:14:00Z", until="pick-samples"), "pick-samples")
+        r = run("build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PARTIAL build", r.stdout)
+        out = latest()
+        self.assertTrue(out["partial"])
+        self.assertEqual({e["ticker"] for e in out["rankings"]} - set(br.megacap_list()), set())
+        run("plan", "--now", "2026-10-09T14:14:00Z", "--reads-left-today", "900")
+        rj = runjson()
+        r = run("record", *["%s=%s" % (g["key"], Z29) for g in rj["groups"]], "--no-sleep")
+        r = run("build")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("megacaps not fully counted", r.stderr)
+
+    def test_clean_gate_in_flow(self):
+        """Memecoin/template chatter is not discovered; a split leaf without clean sample evidence is held back."""
+        series = dict(self.series)
+        series["TM"] = [40] * 29
+        sim = Sim(series, clean_posts=[], spam_posts=["TM", self.hot])
+        drive(sim, "2026-10-09T09:14:00Z")
+        out = latest()
+        ranked = {e["ticker"] for e in out["rankings"]}
+        self.assertNotIn("TM", ranked)
+        self.assertNotIn(self.hot, ranked)
+        self.assertIn("TM", [h["ticker"] for h in out["held_back"]])     # found by splits, sample is spam
+        td = {e["ticker"]: e for e in today()["tickers"]}
+        self.assertTrue(td["TM"]["held_back"])
+        self.assertIn("clean", td["TM"]["held_back_reason"])
+        for p in runjson()["picks"]["individual"]:
+            self.assertTrue(p["query"].startswith("$%s %s" % (p["ticker"], br.suffix())))
+
+
+class Subtraction(unittest.TestCase):
+    def test_overlap_flag_and_clamp(self):
+        r = {"counts": {"P": {"buckets": [100] * 29}, "P.1": {"buckets": [40] * 29}, "P.2": {"buckets": [40] * 29},
+                        "P.3": {"buckets": [30] * 29}},
+             "splits": [{"node": "P", "children": ["P.1", "P.2", "P.3", "P.4"], "measure": ["P.1", "P.2", "P.3"],
+                         "infer": "P.4"}], "skipped": []}
+        notes = br.finalize_splits(r)
+        self.assertEqual(r["counts"]["P.4"]["buckets"], [0] * 29)
+        self.assertTrue(r["counts"]["P.4"]["inferred"])
+        self.assertTrue(r["splits"][0]["overlap_warning"])
+        self.assertTrue(notes)
+
+    def test_validate_tree(self):
+        t = {"nodes": {"S01": {"tickers": ["A", "B", "C", "D"], "parent": None, "children": ["S01.1", "S01.2"]},
+                       "S01.1": {"tickers": ["A", "B"], "parent": "S01", "children": []},
+                       "S01.2": {"tickers": ["C", "D"], "parent": "S01", "children": []}}}
+        self.assertTrue(br.validate_tree(t))
+        t["nodes"]["S01.2"]["tickers"] = ["C", "E"]
+        with self.assertRaises(br.SplitStateError):
+            br.validate_tree(t)
+        t["nodes"]["S01.2"]["tickers"] = ["C", "D"]
+        t["nodes"]["S01.2"]["parent"] = "S02"
+        with self.assertRaises(br.SplitStateError):
+            br.validate_tree(t)
+
+    def test_split_tickers(self):
+        self.assertEqual([len(x) for x in br.split_tickers(list("ABCDEFGHIJ"))], [3, 3, 2, 2])
+        self.assertEqual(br.split_tickers(list("AB")), [["A"], ["B"]])
 
 
 if __name__ == "__main__":
