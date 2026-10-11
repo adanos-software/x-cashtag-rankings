@@ -261,11 +261,22 @@ def metrics(b):
     }
 
 
-def heat(m):
-    """Unusual activity of a group: hourly excess over its own baseline (both views)."""
-    e1 = max(0.0, m["last_hour"] - m["prev_9h_avg"])
-    e5 = max(0.0, (m["mentions"] - (m["prev_day_same_hours"] or 0)) / WINDOW_HOURS)
+def heat(m, r5=1.0, r1=1.0):
+    """Unusual activity of a group: hourly excess over its own baseline (both views), where the
+    baseline is scaled by the typical ratio of ALL groups of the same kind in this run (r5, r1).
+    Without that scaling every group scored 0.0 whenever the whole market was quieter than
+    yesterday / than the previous hours (e.g. Saturday evening vs Friday evening: 2026-10-10 23:41Z
+    and 2026-10-11 04:39Z had 0.0 for all 15 groups), so sample groups were picked by tie-break."""
+    e1 = max(0.0, m["last_hour"] - r1 * m["prev_9h_avg"])
+    e5 = max(0.0, (m["mentions"] - r5 * (m["prev_day_same_hours"] or 0)) / WINDOW_HOURS)
     return round(e1 + e5, 1)
+
+
+def market_ratios(ms):
+    """Median 5h-vs-yesterday and last-hour-vs-9h ratios over a set of group metrics."""
+    r5 = [m["mentions"] / m["prev_day_same_hours"] for m in ms if m.get("prev_day_same_hours")]
+    r1 = [m["last_hour"] / m["prev_9h_avg"] for m in ms if m.get("prev_9h_avg")]
+    return (statistics.median(r5) if r5 else 1.0), (statistics.median(r1) if r1 else 1.0)
 
 
 # --- universe ----------------------------------------------------------------
@@ -733,8 +744,13 @@ def group_metrics(run):
         if not c:
             continue
         m = metrics(c["buckets"])
-        m["heat"] = heat(m)
         out.append((g, m))
+    for kind in {g["kind"] for g, _ in out}:
+        ms = [m for g, m in out if g["kind"] == kind]
+        r5, r1 = market_ratios(ms)
+        for m in ms:
+            m["heat"] = heat(m, r5, r1)
+            m["market_ratio_5h"], m["market_ratio_1h"] = round(r5, 3), round(r1, 3)
     return out
 
 
@@ -778,8 +794,20 @@ def term_patterns(terms=None):
     return out
 
 
+# Crypto/memecoin context, matched locally on sampled posts only (costs no query characters).
+# Deliberately memecoin-style words, not bitcoin/btc/eth (normal for $MSTR $COIN $IREN), not 'meme' ($GME
+# 'meme stock') and 'NNx' only as a call ('20x profit', '185x up from'), not '30x earnings'.
+CRYPTO_CONTEXT_RE = re.compile(
+    r"(?<![\w$])(cardano|solana|memecoins?|meme ?coins?|pump ?fun|pumpswap|aped?|degens?|gems?|"
+    r"\d{1,5}(?:\.\d+)?x (?:profit|gains?|up|from|on|run|pump|move)|moon(?:ing)?|wagmi|ngmi|lore|cto|dex|presale|onchain|on-chain|airdrop|new coins?|"
+    r"contract address|bonding curve)(?![\w])", re.I)
+CRYPTO_ADDR_RE = re.compile(r"(?<![\w])(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})(?![\w])")
+CRYPTO_HANDLE_RE = re.compile(r"@\w*(sol|gem|crypto|coin|1000x|100x|meme|pump|degen|hodl|airdrop)\w*", re.I)
+MIN_REAL_WORDS = 3           # posts with fewer real words ("$hodl gang", "20x on $TM") are not clean context
+
+
 def classify_post(text, author, bad_accounts, templates, patterns):
-    """-> (class, cashtags). Classes: spam_account, template, dump, spam_term, clean."""
+    """-> (class, cashtags). Classes: spam_account, template, dump, spam_term, crypto, short, clean."""
     tags = []
     for t in TEXT_CASHTAG_RE.findall(text):
         t = t.upper()
@@ -794,6 +822,11 @@ def classify_post(text, author, bad_accounts, templates, patterns):
     low = text.lower()
     if any(rx.search(low) for rx in patterns):
         return "spam_term", tags
+    if CRYPTO_ADDR_RE.search(re.sub(r"https?://\S+", " ", text)) or CRYPTO_HANDLE_RE.search(text) or \
+            CRYPTO_CONTEXT_RE.search(re.sub(r"https?://\S+|[@#]\w+", " ", text)):
+        return "crypto", tags
+    if real_words(text) < MIN_REAL_WORDS:
+        return "short", tags
     return "clean", tags
 
 
@@ -825,7 +858,7 @@ def analyze_samples(run, keys=None):
     agg, stats = {}, {}
     for key, p in posts:
         st = stats.setdefault(key, {"posts": 0, "kept": 0, "spam_account": 0, "template": 0,
-                                    "dump": 0, "spam_term": 0})
+                                    "dump": 0, "spam_term": 0, "crypto": 0, "short": 0})
         st["posts"] += 1
         cls, tags = classify_post(p["text"], p["author"], bad_accounts, templates, patterns)
         if cls == "clean":

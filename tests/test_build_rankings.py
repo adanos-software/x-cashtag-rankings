@@ -177,7 +177,7 @@ class Samples(unittest.TestCase):
         run_obj = {"samples": {"smp-X": {"posts": [
             {"author": "a1", "text": "$IPW breaking out premarket"},
             {"author": "a2", "text": "watching $IPW and $DKI today"},
-            {"author": "a3", "text": "$DKI gap up"},
+            {"author": "a3", "text": "$DKI gap up this morning"},
             {"author": "Yuki_rodds", "text": "$MI great company"},
             {"author": "camila", "text": "$A $B $C $D $E $F $G $H $IPW"},
         ] + [{"author": "t%d" % i, "text": "Heads up $GM Family! time to support the listing, fewer than %d left! go" % i}
@@ -205,6 +205,31 @@ class Samples(unittest.TestCase):
         self.assertEqual(cls("I'm your stock analyst! send me your WhatsApp number $TM"), "spam_term")
         self.assertEqual(cls("185x up from my call on $TM https://t.co/x"), "spam_term")
         self.assertEqual(cls("Reply \"Hot Stocks\" to join $TM $AAPL"), "spam_term")
+
+    def test_crypto_context_and_short_posts(self):
+        cls = lambda text: br.classify_post(text, "x", set(), set(), br.term_patterns())[0]
+        # HODL (VanEck Bitcoin ETF) in the 2026-10-11 06:14 run: memecoin chatter passed as clean
+        self.assertEqual(cls("@SolGemsAlert Certainly only a yet unknown one. Or $HODL if you can"), "crypto")
+        self.assertEqual(cls("top 3 meme projects on Cardano so far stay together choose $HODL"), "crypto")
+        self.assertEqual(cls("13 years of lore. One timeless message. $HODL."), "crypto")
+        self.assertEqual(cls("@hodl2013 $hodl gang"), "crypto")
+        self.assertEqual(cls("$HODL gang"), "short")
+        self.assertEqual(cls("20x on $TM"), "crypto")
+        self.assertEqual(cls("$PLTR :-)"), "short")
+        self.assertEqual(cls("185x up from the entry on $TM, what a run for everyone"), "crypto")
+        # no false positives on normal stock talk
+        self.assertEqual(cls("$GME meme stock rally again, volume is huge today and shorts are covering"), "clean")
+        self.assertEqual(cls("$NVDA trades at 30x earnings, bitcoin miners like $IREN pivoting to AI"), "clean")
+
+    def test_group_heat_is_relative_to_market(self):
+        # every group quieter than yesterday (weekend evening): old heat was 0.0 for all
+        ms = [br.metrics([200] * 5 + [100] * 19 + [b] * 5) for b in (50, 60, 90)]
+        r5, r1 = br.market_ratios(ms)
+        heats = [br.heat(m, r5, r1) for m in ms]
+        self.assertEqual([br.heat(m) for m in ms], [0.0, 0.0, 0.0])
+        self.assertEqual(heats[0], 0.0)
+        self.assertGreater(heats[2], heats[1])
+        self.assertGreater(heats[2], 0)
 
     def test_clean_gate(self):
         ok = {"authors": {"a", "b", "c"}, "posts": 3, "total": 4, "share": 0.75}

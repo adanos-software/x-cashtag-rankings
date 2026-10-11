@@ -196,8 +196,8 @@ git push origin main
 - Groups are packed by the script: every non-core stock plus the demoted core, OR'ed, ≤4096 characters including the spam
   suffix (13 stock groups since the 2026-10-10 suffix). 2 of 13 ETF groups rotate per run.
 - Spam: `config/spam_filter.txt` goes on every query (groups, every individual count, samples). Sampled posts from
-  `config/spam_accounts.txt`, templates, ticker dumps (> 8 cashtags, or >= 4 with < 8 real words) and filter-term posts are not
-  clean. Non-core tickers are only ranked after a clean check (>= 3 clean authors, >= 30% clean); failures go to `held_back`.
+  `config/spam_accounts.txt`, templates, ticker dumps (> 8 cashtags, or >= 4 with < 8 real words), filter-term posts, crypto/memecoin
+  context and posts with < 3 real words are not clean. Non-core tickers are only ranked after a clean check (>= 3 clean authors, >= 30% clean); failures go to `held_back`.
   Maintain the config lists only between runs, never mid-run; run `check` after editing.
 - Ranking: exact 5h filtered count. Collision tickers additionally use their per-ticker terms. Bursts that collapsed are capped in `rank_score`.
   `risers` is a separate list.
