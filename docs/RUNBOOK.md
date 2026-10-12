@@ -28,12 +28,15 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
     - A third 429 means `GIVE UP`: the call is skipped. Never make a 4th attempt.
   - **Any other error** (invalid request, 5xx, timeout, malformed result): `record-error KEY --kind other` says `RETRY` once.
     A second failure means `GIVE UP`.
+  - **Never retry without `record-error` first.** The script also compares reads-left (B) with the recorded calls; a gap
+    is counted as unrecorded retries (`unrecorded_retries`) against the retry reserve and printed as a WARNING
+    (2026-10-12 11:14: two BA retries were not recorded). Reads spent by other bots in the same minutes show up the same way.
   - **Do what the script says:** `WAIT`, `RETRY`, `GIVE UP` or `STOP`. Never retry a call the script has skipped.
 - **Stop rules** (the script prints `STOP` and refuses further calls; `next-call` shows `STOPPED`):
   - **5 non-429 errors** in the run, or
   - the **retry reserve of 10 extra reads is used up** (429s and other errors together), or
   - reads left today ≤ 400.
-  - After a STOP, the script tells you whether a **partial build** is allowed (group sweep and all 10 megacap counts done) or
+  - After a STOP, the script tells you whether a **partial build** is allowed (all 13 STOCK groups and all 10 megacap counts done; a missing ETF group, split part or sample is only recorded as missing) or
     whether to **`abandon`**.
 - **Daily budget:** Alexander's cap is **600 X reads per UTC day, shared with all bots**.
   - Every x result ends with `X reads left for this user: A of 30 this minute ..., B of 1000 today ...`.
@@ -156,7 +159,7 @@ python3 scripts/build_rankings.py next      # "NEXT: build", or STOPPED with adv
 python3 scripts/build_rankings.py build
 ```
 - **Complete run:** `"partial": false`.
-- **Stopped or ended early:** `build` works only if **all group counts and all 10 megacap counts** are recorded. The JSON then
+- **Stopped or ended early:** `build` works only if **all stock group counts and all 10 megacap counts** are recorded (missing ETF groups, split parts or samples are listed in `missing_calls` and the ETF group is queued for the next run). The JSON then
   has `"partial": true`, a `partial_reason`, the missing tickers in `planned_not_measured`, and a note starting with `PARTIAL RUN`.
 - **Otherwise** `build` refuses. Then run:
   ```bash
@@ -202,7 +205,7 @@ git push origin main
 - gh not authenticated, no push access, or the push is refused other than non-fast-forward
 - `check` fails or the script crashes. Do not edit code mid-run; report the traceback and `abandon`.
 - `SKIP RUN`, or B would go below 400
-- `STOP` followed by a refused build (`abandon`), i.e. the group sweep or the megacaps are incomplete
+- `STOP` followed by a refused build (`abandon`), i.e. a stock group or a megacap is missing
 - a fail-closed split state (`splits-reset` needed); the run itself may still be fine after the reset
 - a published PARTIAL run: still report it as degraded, with the reason
 - X tools unavailable, or the `x` namespace not ready. Never switch to `user-X`.

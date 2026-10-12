@@ -91,7 +91,7 @@ It is stored in [`data/universe.csv`](data/universe.csv) (10,898 symbols on 2026
 - X calls are made strictly one at a time, with a ~4 s pause after each one (≤15 calls per minute; in practice ~4–6). A run takes about 35–45 minutes.
 - On HTTP 429 (rate limited), the same call is retried after 60 s, and once more after 120 s. A call that fails 3 times is skipped.
 - A run stops after 5 non-429 errors, or when the retry reserve is used up.
-- If a run ends early but the whole group sweep and all 10 megacap counts are done, it is published with `"partial": true` and a `partial_reason`. Otherwise nothing is published.
+- If a run ends early but all stock groups and all 10 megacap counts are done (ETF groups, split parts and samples may be missing: listed in `missing_calls`, with a note in today.json; a missing ETF group is counted first in the next run), it is published with `"partial": true` and a `partial_reason`. Otherwise nothing is published.
 - If fewer reads are left, the script shrinks the daily counts first (to 10), then splits (to 9), ETF groups, samples, spare, then the rest; megacaps last.
 - A run is skipped if fewer than ~20 reads fit.
 
@@ -173,7 +173,7 @@ Added fields:
   - `adaptive_splits`: the split rule, reads, prune notes, and every split of the run (node, parts with size/range/mentions, `subtracted`, `overlap_warning`); `state` says whether the tree was saved.
   - `freshness`: every ranked ticker was counted in this run; per entry `last_measured` is the time of its count.
   - `x_reads_breakdown` adds `split_counts`, `megacap_counts`, `daily_counts`.
-  - `partial` / `partial_reason`: `true` when a run ended early but published, because the full group sweep and all megacap counts were done. The missing tickers are in `planned_not_measured`, and the `note` starts with `PARTIAL RUN`.
+  - `partial` / `partial_reason`: `true` when a run ended early but published, because all stock groups and all megacap counts were done (`missing_calls` lists what is missing). The missing tickers are in `planned_not_measured`, and the `note` starts with `PARTIAL RUN`.
 - **Per entry:**
   - `tier`: `core` (megacaps and core) or `discovered`.
   - `source` (v3): `megacap`, `core-daily`, `split-leaf`, `sample`, `hot-reread` (v2 snapshots: `core`, `core-returned`, `carryover`, `discovered`).

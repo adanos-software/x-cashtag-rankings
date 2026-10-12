@@ -842,6 +842,28 @@ def save_run(run):
     write_json(RUN_JSON, run)
 
 
+def reconcile_reads(run, n):
+    """Retry tally from the X counter: if reads-left fell by more than the reads the run has recorded since
+    the last report, the gap was spent on calls nobody recorded (typically a retry after a 429 without
+    record-error). It is added to extra_reads (so the retry reserve stays honest) and logged."""
+    if n is None:
+        return 0
+    lg = run["log"]
+    mark = lg.get("left_mark")
+    gap = 0
+    if mark:
+        gap = (mark[0] - n) - (reads_used(run) - mark[1])
+        if gap > 0:
+            lg["extra_reads"] += gap
+            lg["unrecorded_reads"] = lg.get("unrecorded_reads", 0) + gap
+            lg.setdefault("unrecorded_log", []).append([iso(utcnow()), gap])
+            print("WARNING: reads left fell by %d more than the recorded calls; counted as %d unrecorded "
+                  "retry/extra read(s). Always run record-error for a failed call before retrying it." % (gap, gap))
+    if not mark or n <= mark[0]:
+        lg["left_mark"] = [n, reads_used(run)]
+    return max(0, gap)
+
+
 def note_reads_left(run, n):
     if n is not None:
         prev = run["log"].get("reads_left_today")
@@ -973,7 +995,16 @@ def cmd_plan(args):
             known[t] = sum(rec["h"].get(hour_key(le - timedelta(hours=i)), 0) for i in range(1, 25))
     n = len(etf_groups)
     first = state["etf_rotation_next"] % n if n else 0
-    etf_pick = [(first + i) % n for i in range(targets["etf_groups"])] if n else []
+    requeue = [int(k[1:]) - 1 for k in state.get("etf_requeue", []) if re.fullmatch(r"E\d+", k) and int(k[1:]) <= n]
+    requeue = requeue[:targets["etf_groups"]]
+    etf_rotated = []
+    i = 0
+    while n and len(requeue) + len(etf_rotated) < min(targets["etf_groups"], n) and i < n:
+        idx = (first + i) % n
+        if idx not in requeue:
+            etf_rotated.append(idx)
+        i += 1
+    etf_pick = requeue + etf_rotated
     groups = []
     for i, g in enumerate(stock_groups):
         groups.append({"key": "S%02d" % (i + 1), "kind": "stock", "tickers": g,
@@ -1018,9 +1049,12 @@ def cmd_plan(args):
                 "retries_429": 0, "errors_other": 0, "attempts": {}},
         "skipped": [],
         "stopped": None,
+        "etf_requeued": ["E%02d" % (i + 1) for i in requeue],
+        "etf_rotated": ["E%02d" % (i + 1) for i in etf_rotated],
     }
     if args.reads_left_today is not None:
         run["log"]["reads_left_history"].append([iso(now), args.reads_left_today])
+        run["log"]["left_mark"] = [args.reads_left_today, 0]
     save_run(run)
     print("window %s -> %s UTC (29h buckets from %s); budget %d reads" % (run["window_start"], run["window_end"],
                                                                           run["history_start"], budget))
@@ -1192,15 +1226,29 @@ def stop_checks(run):
 
 
 def partial_ok(run):
-    """A run that did not finish may still be built (labelled partial) if the whole group sweep
-    and all megacap counts are done."""
-    miss = [g["key"] for g in run["groups"] if g["key"] not in run["counts"]]
+    """A run that did not finish may still be built (labelled partial) if every STOCK group and all megacap
+    counts are done. Missing ETF groups, split parts and samples are recorded as missing (ETF groups are
+    queued for the next run)."""
+    miss = [g["key"] for g in run["groups"] if g["kind"] == "stock" and g["key"] not in run["counts"]]
     if miss:
-        return False, "group sweep incomplete: %s" % ",".join(miss)
+        return False, "stock group sweep incomplete: %s" % ",".join(miss)
     mmiss = [t for t in run["megacaps"] if t not in run["counts"]]
     if mmiss:
         return False, "megacaps not fully counted (%d missing: %s)" % (len(mmiss), ",".join(mmiss))
     return True, None
+
+
+def missing_calls(run):
+    """Planned calls that were not measured, by kind (for honest notes in the outputs)."""
+    sk = set(run.get("skipped") or [])
+    out = {"etf_groups": [g["key"] for g in run["groups"] if g["kind"] == "etf" and g["key"] not in run["counts"]],
+           "split_parts": [c for op in run["splits"] for c in op["measure"] if c not in run["counts"]],
+           "samples": [p["key"] for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or [])
+                       if p["key"] not in run["samples"]],
+           "individual_counts": [p["ticker"] for p in (run["picks"]["individual"] or [])
+                                 if p["ticker"] not in run["counts"]],
+           "skipped_after_errors": sorted(sk)}
+    return {k: v for k, v in out.items() if v}
 
 
 def run_complete(run):
@@ -1262,6 +1310,7 @@ def cmd_record(args):
     if args.extra_reads:
         run["log"]["extra_reads"] += args.extra_reads
         run["log"]["errors_other"] += args.extra_reads
+    reconcile_reads(run, args.reads_left_today)
     note_reads_left(run, args.reads_left_today)
     msg = stop_checks(run)
     save_run(run)
@@ -1538,6 +1587,7 @@ def cmd_record_sample(args):
     else:
         sys.exit("give --json FILE, --lines FILE or --failed")
     run["samples"][args.key] = {"posts": posts or [], "failed": posts is None, "recorded_at": iso(utcnow())}
+    reconcile_reads(run, args.reads_left_today)
     note_reads_left(run, args.reads_left_today)
     msg = stop_checks(run)
     save_run(run)
@@ -1563,6 +1613,7 @@ def cmd_record_error(args):
         lg["retries_429"] += 1
     else:
         lg["errors_other"] += 1
+    reconcile_reads(run, args.reads_left_today)
     note_reads_left(run, args.reads_left_today)
     n429 = sum(1 for a in att if a["kind"] == "429")
     noth = sum(1 for a in att if a["kind"] != "429")
@@ -1912,13 +1963,15 @@ def cmd_build(args):
         "measured_until": times[-1],
         "planned_not_measured": not_measured,
         "x_reads_used": n_groups + n_split + n_smp + n_ind + extra,
-        "x_reads_breakdown": {"group_counts": n_groups, "split_counts": n_split, "samples": n_smp,
+        "x_reads_breakdown": {"unrecorded_retries": int(run["log"].get("unrecorded_reads", 0)),
+                              "group_counts": n_groups, "split_counts": n_split, "samples": n_smp,
                               "individual_counts": n_ind, "megacap_counts": n_mega,
                               "daily_counts": n_ind - n_mega,
                               "extra_errors_retries": extra,
                               "retries_429": int(run["log"].get("retries_429", 0)),
                               "errors_other": int(run["log"].get("errors_other", 0))},
         "partial": not complete,
+        "missing_calls": missing_calls(run),
         "partial_reason": partial_reason,
         "x_reads_left_today": run["log"].get("reads_left_today"),
         "ranking_rule": ("rank_score = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
@@ -1937,6 +1990,8 @@ def cmd_build(args):
             "etf_tickers_total": run["etf_tickers_total"],
             "etf_tickers_screened": sum(g["size"] for g in etf_groups),
             "groups_missing": missing_groups,
+            "etf_groups_requeued_from_last_run": run.get("etf_requeued", []),
+            "etf_groups_queued_for_next_run": [k for k in missing_groups if k.startswith("E")],
             "note": ("A group count is an exact count of posts mentioning ANY ticker of the group (a post with "
                      "several of them counts once), with the spam filter applied. It is an upper bound for "
                      "every member, so a quiet group means all its tickers are quiet."),
@@ -2028,6 +2083,17 @@ def cmd_build(args):
     core_all = set(core_list())
     through = parse_iso(run["window_end"])
     today_entries = write_daily(hourly, day, through, universe, core_all, mega_all, TODAY_JSON, now)
+    mc = missing_calls(run)
+    if mc or not complete:
+        td = load_json(TODAY_JSON, {})
+        td["notes"] = [("latest run (window end %s) was PARTIAL: %s" % (run["window_end"], partial_reason))
+                       if not complete else "latest run (window end %s) complete" % run["window_end"]]
+        if mc.get("etf_groups"):
+            td["notes"].append("ETF groups not counted in the latest run (no upper bounds from them; queued for the "
+                               "next run): %s" % ", ".join(mc["etf_groups"]))
+        if mc.get("split_parts") or mc.get("samples"):
+            td["notes"].append("missing split parts/samples: %s" % ", ".join(mc.get("split_parts", []) + mc.get("samples", [])))
+        write_json(TODAY_JSON, td)
     prev_day = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     if any(day_of(w) == prev_day for w in hourly["windows"]):
         write_daily(hourly, prev_day, through, universe, core_all, mega_all,
@@ -2058,9 +2124,12 @@ def cmd_build(args):
             cc[t] = run["window_end"]
     cut = parse_iso(run["window_end"]) - timedelta(hours=CLEAN_CHECK_MAX_AGE_HOURS)
     state["clean_checks"] = {t: v for t, v in sorted(cc.items()) if parse_iso(v) >= cut}
-    if etf_groups and run["etf_groups_total"]:
-        last = int(etf_groups[-1]["key"][1:]) - 1
+    rotated = run.get("etf_rotated", [g["key"] for g in etf_groups])
+    if rotated and run["etf_groups_total"]:
+        last = int(rotated[-1][1:]) - 1
         state["etf_rotation_next"] = (last + 1) % run["etf_groups_total"]
+    # ETF groups that could not be counted are queued for the next run
+    state["etf_requeue"] = [k for k in missing_groups if k.startswith("E")]
     state["method_version"] = METHOD_VERSION
     state["updated_at"] = iso(now)
     write_json(STATE_JSON, state)

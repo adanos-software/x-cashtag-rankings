@@ -610,6 +610,67 @@ class SplitFlow(unittest.TestCase):
             self.assertTrue(p["query"].startswith("$%s %s" % (p["ticker"], br.suffix())))
 
 
+class PartialAndTally(unittest.TestCase):
+    def setUp(self):
+        reset_data()
+
+    def test_missing_etf_group_still_publishes_and_is_requeued(self):
+        sim = Sim({"NVDA": [60] * 29})
+        self.assertEqual(drive(sim, "2026-10-12T09:14:00Z", until="pick-samples"), "pick-samples")
+        rj = runjson()
+        etf = [g["key"] for g in rj["groups"] if g["kind"] == "etf"]
+        # pretend the last ETF group failed 3x 429: rebuild a run where it is skipped
+        run("plan", "--now", "2026-10-12T09:14:00Z", "--reads-left-today", "900")
+        rj = runjson()
+        etf = [g["key"] for g in rj["groups"] if g["kind"] == "etf"]
+        for g in rj["groups"]:
+            if g["key"] != etf[1]:
+                run("record", "%s=%s" % (g["key"], Z29), "--no-sleep")
+        for k in ("429", "429", "429"):
+            run("record-error", etf[1], "--kind", k)
+        self.assertIn(etf[1], runjson()["skipped"])
+        for t in runjson()["megacaps"]:
+            run("record", "%s=%s" % (t, Z29), "--no-sleep")
+        r = run("build")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = latest()
+        self.assertTrue(out["partial"])
+        self.assertIn(etf[1], out["partial_reason"])
+        self.assertEqual(out["missing_calls"]["etf_groups"], [etf[1]])
+        self.assertEqual(out["group_sweep"]["etf_groups_queued_for_next_run"], [etf[1]])
+        self.assertTrue(any(etf[1] in n for n in today()["notes"]))
+        run("plan", "--now", "2026-10-12T14:14:00Z", "--reads-left-today", "800")
+        rj = runjson()
+        nxt = [g["key"] for g in rj["groups"] if g["kind"] == "etf"]
+        self.assertEqual(nxt[0], etf[1])                 # requeued first
+        self.assertEqual(len(nxt), 3)
+        self.assertEqual(len(set(nxt)), 3)
+
+    def test_missing_stock_group_refuses(self):
+        run("plan", "--now", "2026-10-12T09:14:00Z", "--reads-left-today", "900")
+        rj = runjson()
+        for g in rj["groups"]:
+            if g["key"] != "S02":
+                run("record", "%s=%s" % (g["key"], Z29), "--no-sleep")
+        for t in rj["megacaps"]:
+            run("record", "%s=%s" % (t, Z29), "--no-sleep")
+        r = run("build")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("stock group sweep incomplete: S02", r.stderr)
+
+    def test_unrecorded_retries_are_tallied(self):
+        run("plan", "--now", "2026-10-12T09:14:00Z", "--reads-left-today", "900")
+        run("record", "S01=" + Z29, "--reads-left-today", "899", "--no-sleep")
+        r = run("record", "S02=" + Z29, "--reads-left-today", "896", "--no-sleep")   # 2 retries not recorded
+        self.assertIn("2 unrecorded", r.stdout)
+        lg = runjson()["log"]
+        self.assertEqual((lg["extra_reads"], lg["unrecorded_reads"]), (2, 2))
+        run("record-error", "S03", "--kind", "429", "--reads-left-today", "895")
+        run("record", "S03=" + Z29, "--reads-left-today", "894", "--no-sleep")
+        lg = runjson()["log"]
+        self.assertEqual((lg["extra_reads"], lg["unrecorded_reads"], lg["retries_429"]), (3, 2, 1))
+
+
 class Subtraction(unittest.TestCase):
     def test_overlap_flag_and_clamp(self):
         r = {"counts": {"P": {"buckets": [100] * 29}, "P.1": {"buckets": [40] * 29}, "P.2": {"buckets": [40] * 29},
