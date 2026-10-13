@@ -23,8 +23,8 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
     950 of the day's reads were left.
 - **Retries (every retry costs a read and MUST be recorded with `record-error`):**
   - **HTTP 429 / "Too Many Requests" / rate limit:**
-    - `record-error KEY --kind 429` prints `WAIT 60s`. Run Shell `sleep 60` (with `block_until_ms` ≥ 75000), then retry the SAME call.
-    - If it gets a second 429, the script prints `WAIT 120s`. Run `sleep 120` (`block_until_ms` ≥ 135000), then make one last try.
+    - `record-error KEY --kind 429` prints `WAIT 90s`. Run Shell `sleep 90` (with `block_until_ms` ≥ 105000), then retry the SAME call.
+    - If it gets a second 429, the script prints `WAIT 240s`. Run `sleep 240` (`block_until_ms` ≥ 255000), then make one last try. After a `GIVE UP` on 429s, `sleep 300` before the next call.
     - A third 429 means `GIVE UP`: the call is skipped. Never make a 4th attempt.
   - **Any other error** (invalid request, 5xx, timeout, malformed result): `record-error KEY --kind other` says `RETRY` once.
     A second failure means `GIVE UP`.
@@ -147,7 +147,7 @@ For an X call:
      ```bash
      python3 scripts/build_rankings.py record-error S05 --kind 429 --detail "429 Too Many Requests" --reads-left-today <B>
      ```
-     Then do exactly what it prints: `WAIT 60s` → `sleep 60`, then the same call; `WAIT 120s` → `sleep 120`, then the same call one
+     Then do exactly what it prints: `WAIT 90s` → `sleep 90`, then the same call; `WAIT 240s` → `sleep 240`, then the same call one
      last time; `RETRY` → the same call once more; `GIVE UP` → continue with `next-call`; `STOP` → step 3.
 3. **First call of the run:** record it right away with its B. If the script prints `SKIP RUN`, run
    `abandon --reason "budget skip"` and report a skip. Don't build or commit.
@@ -213,7 +213,7 @@ git push origin main
 
 ## Method summary (do not change silently)
 - Constants are at the top of `scripts/build_rankings.py`:
-  - `RUN_READS=95`, `RETRY_RESERVE=10`, `MAX_OTHER_ERRORS=5`, `PACE_SECONDS=4`, `WAIT_429=(60, 120)`
+  - `RUN_READS=95`, `RETRY_RESERVE=10`, `MAX_OTHER_ERRORS=5`, `PACE_SECONDS=6`, `WAIT_429=(90, 240)`, `COOLDOWN_AFTER_GIVE_UP=300`, `SAMPLE_MAX_QUERY_LEN=4095`, `OWN_SAMPLES=4`
   - `MEGACAPS_N=10`, `ETF_GROUPS_PER_RUN=3`, `SPLIT_READS=24`, `SAMPLE_GROUPS=6`, `COMENTION_SAMPLES=4`, `SPARE=4`,
     `DAILY_COUNTS_MAX=35`, `CORE_DAILY_MIN=10`
   - splits: `LEAF_MAX=3`, `LEAF_MIN_24H=15`, `SPLIT_MIN_24H=40`, `DRILL_CONC=1.6`, `NODE_MAX_AGE_HOURS=30`, `MAX_NODES=400`,
@@ -237,5 +237,5 @@ git push origin main
   `held_back` (and `held_back: true` in today.json).
   Maintain the config lists only between runs, never mid-run; run `check` after editing.
 - Ranking: exact 5h filtered count of the tickers counted in this run. Collision tickers additionally use their per-ticker terms.
-  Bursts that collapsed are capped in `rank_score`. `risers` is a separate list. `data/today.json` is the daily view.
+  Ranked by `rank_score` (clean-adjusted: `rank_score_raw` × `clean_share_est`); bursts that collapsed are capped in `rank_score_raw`. `risers` is a separate list. `data/today.json` is the daily view.
 - Change config only between runs. Run `check` and `python3 -m unittest discover tests` before committing such a change.

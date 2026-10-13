@@ -11,7 +11,7 @@ generates every query (groups, split parts, tickers, samples); never build one b
     python3 scripts/build_rankings.py record KEY=TOTAL:b1,...,b29 --reads-left-today B     (counts; pauses 4s)
     python3 scripts/build_rankings.py record-sample KEY --lines FILE --reads-left-today B  (samples; pauses 4s)
     python3 scripts/build_rankings.py record-error KEY --kind 429|other --reads-left-today B   (on errors;
-        prints WAIT 60s / WAIT 120s / RETRY / GIVE UP / STOP)
+        prints WAIT 90s / WAIT 240s / RETRY / GIVE UP / STOP)
     script steps when next-call says so: pick-samples (twice), pick-candidates
   python3 scripts/build_rankings.py build          # complete run, or partial if group sweep + megacaps are done
   python3 scripts/build_rankings.py abandon --reason "..."   # archive an unpublishable run
@@ -66,8 +66,8 @@ DAILY_QUOTA = 1000           # the x tools report "B of 1000 today"; used today 
 FLOOR_LEFT = DAILY_QUOTA - DAILY_CAP   # never let "reads left today" drop below this (400)
 MIN_RUN_READS = 20           # skip the run if fewer reads fit
 ETF_GROUPS_PER_RUN = 3       # ETF groups rotate, 3 per run (14 groups -> each about once a day)
-SAMPLE_GROUPS = 6            # stage-1 samples: the hottest fresh groups / split nodes
-COMENTION_SAMPLES = 4        # stage-2 samples: top new tickers from stage 1, unverified split leaves, risers
+SAMPLE_GROUPS = 4            # stage-1 samples: the hottest fresh groups / split nodes
+COMENTION_SAMPLES = 2        # stage-2 samples: top new tickers from stage 1, unverified split leaves, risers
 MEGACAPS_N = 10              # config/megacaps.txt: counted individually every run
 SPLIT_READS = 24             # adaptive 4-way splits per run (3 reads with subtraction, 4 if the parent is stale)
 DAILY_COUNTS_MAX = 35        # exact 29h counts per run for split leaves, sample candidates, hot re-reads, core
@@ -91,8 +91,17 @@ CORE_FLOOR = 10              # budget shrink: core is cut first, down to this
 SPARE = 4                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
 RETRY_RESERVE = 10           # extra reads per run for retries (429 / errors), on top of RUN_READS -> max ~105
 MAX_OTHER_ERRORS = 5         # stop the run after this many non-429 errors
-PACE_SECONDS = 4             # record commands pause this long, so calls stay strictly sequential (<= ~15/min)
-WAIT_429 = (60, 120)         # wait before the 1st and the 2nd (last) retry of a call that got HTTP 429
+PACE_SECONDS = 6             # record commands pause this long, so calls stay strictly sequential (<= ~10/min)
+WAIT_429 = (90, 240)         # wait before the 1st and the 2nd (last) retry of a call that got HTTP 429
+COOLDOWN_AFTER_GIVE_UP = 300 # after a call gave up on 429s, pause before the next call (shared limit recovers)
+SAMPLE_MAX_QUERY_LEN = 4095  # search_posts_all rejects 4096-char queries that counts accept (2026-10-12 smp-S12)
+OWN_SAMPLES = 4              # per run: recency samples of a ticker's OWN query -> clean-share estimate
+OWN_CLEAN_PRIOR_K = 10       # pseudo-posts of the prior in the smoothed own clean share
+OWN_CLEAN_MAX_AGE_HOURS = 72 # own-sample evidence older than this is dropped
+OWN_CLEAN_DEFAULT_PRIOR = 0.8  # prior before any own sample (2026-10-13 calibration: 8 big tickers 72-96%, median 0.84)
+CRYPTO_SHARE_FLAG = 0.4      # own/sampled posts of a ticker >= 40% crypto (>= 5 posts) -> crypto-collision
+CRYPTO_TAGS = {"BTC", "ETH", "XRP", "SOL", "USDT", "USDC", "HBAR", "XDC", "ADA", "DOGE", "BNB", "XLM", "LINK",
+               "AVAX", "DOT", "SHIB", "PEPE", "SUI", "TRX", "LTC", "TON", "ALGO", "XMR", "ICP", "FET", "QNT"}
 MIN_AUTHORS = 3              # a sampled ticker needs >= 3 distinct authors of CLEAN posts to be a candidate
 MIN_CLEAN_SHARE = 0.3        # ... and >= 30% of the sampled posts mentioning it must be clean
 CLEAN_SHARE_MIN_POSTS = 5    # a clean share is only reported/used with >= 5 sampled posts mentioning the ticker
@@ -937,7 +946,7 @@ def size_run(budget, n_stock_groups, n_etf_groups_avail):
     splits, samples, ETF groups (to 0), megacaps (to 3), spare, megacaps (to 0)."""
     t = {"stock_groups": n_stock_groups, "megacaps": MEGACAPS_N,
          "etf_groups": min(ETF_GROUPS_PER_RUN, n_etf_groups_avail), "splits": SPLIT_READS,
-         "samples": SAMPLE_GROUPS + COMENTION_SAMPLES, "spare": SPARE, "dailies": 0}
+         "samples": SAMPLE_GROUPS + COMENTION_SAMPLES + OWN_SAMPLES, "spare": SPARE, "dailies": 0}
     t["dailies"] = max(10, min(DAILY_COUNTS_MAX, budget - sum(t.values())))
     over = lambda: sum(t.values()) - budget
     for key, floor in (("dailies", 10), ("splits", 9), ("etf_groups", 1), ("samples", 4), ("spare", 1),
@@ -1072,8 +1081,20 @@ def count_args(run, query):
     return {"query": query, "granularity": "hour", "start_time": run["history_start"], "end_time": run["window_end"]}
 
 
-def sample_args(run, query):
-    return {"query": query, "sort_order": "relevancy", "max_results": SAMPLE_MAX_RESULTS,
+def sample_query(tickers):
+    """Group query for a sample, trimmed (members dropped from the end) to <= SAMPLE_MAX_QUERY_LEN."""
+    tk = list(tickers)
+    q = group_query(tk) if len(tk) > 1 else ticker_query(tk[0])
+    while len(q) > SAMPLE_MAX_QUERY_LEN and len(tk) > 1:
+        tk = tk[:-1]
+        q = group_query(tk)
+    return q
+
+
+def sample_args(run, query, sort="relevancy"):
+    if len(query) > SAMPLE_MAX_QUERY_LEN:
+        raise ValueError("sample query of %d chars exceeds %d" % (len(query), SAMPLE_MAX_QUERY_LEN))
+    return {"query": query, "sort_order": sort, "max_results": SAMPLE_MAX_RESULTS,
             "start_time": run["window_start"], "end_time": run["window_end"],
             "post.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"}
 
@@ -1102,7 +1123,7 @@ def pending_calls(run, stage):
     elif stage == "samples":
         for p in (run["picks"]["samples1"] or []) + (run["picks"]["samples2"] or []):
             if p["key"] not in run["samples"] and p["key"] not in skipped:
-                out.append((p["key"], "search_posts_all", sample_args(run, p["query"])))
+                out.append((p["key"], "search_posts_all", sample_args(run, p["query"], p.get("sort", "relevancy"))))
     elif stage == "counts":
         for p in run["picks"]["individual"] or []:
             if p["ticker"] not in run["counts"] and p["ticker"] not in skipped:
@@ -1393,6 +1414,8 @@ def term_patterns(terms=None):
 # Crypto/memecoin context, matched locally on sampled posts only (costs no query characters).
 # Deliberately memecoin-style words, not bitcoin/btc/eth (normal for $MSTR $COIN $IREN), not 'meme' ($GME
 # 'meme stock') and 'NNx' only as a call ('20x profit', '185x up from'), not '30x earnings'.
+CRYPTO_PAIR_RE = re.compile(r"\$?[A-Za-z]{2,6}\s*/\s*\$?(usdt|usdc|usd|btc|eth)\b|\b(altcoins?|blockchains?|the coin|this coin|"
+                            r"chain[- ]agnostic|on[- ]chain|defi|web3|stablecoins?)\b", re.I)
 CRYPTO_CONTEXT_RE = re.compile(
     r"(?<![\w$])(cardano|solana|memecoins?|meme ?coins?|pump ?fun|pumpswap|aped?|degens?|gems?|"
     r"\d{1,5}(?:\.\d+)?x (?:profit|gains?|up|from|on|run|pump|move)|moon(?:ing)?|wagmi|ngmi|lore|cto|dex|presale|onchain|on-chain|airdrop|new coins?|"
@@ -1418,6 +1441,9 @@ def classify_post(text, author, bad_accounts, templates, patterns):
     low = text.lower()
     if any(rx.search(low) for rx in patterns):
         return "spam_term", tags
+    ctags = [t for t in tags if t in CRYPTO_TAGS]
+    if len(ctags) >= 2 or any(t in ("USDT", "USDC") for t in ctags) or CRYPTO_PAIR_RE.search(text):
+        return "crypto", tags
     if CRYPTO_ADDR_RE.search(re.sub(r"https?://\S+", " ", text)) or CRYPTO_HANDLE_RE.search(text) or \
             CRYPTO_CONTEXT_RE.search(re.sub(r"https?://\S+|[@#]\w+", " ", text)):
         return "crypto", tags
@@ -1464,8 +1490,14 @@ def analyze_samples(run, keys=None):
         for t in tags:
             if t in exclude or t not in universe:
                 continue
-            a = agg.setdefault(t, {"authors": set(), "posts": 0, "total": 0, "via": set()})
+            a = agg.setdefault(t, {"authors": set(), "posts": 0, "total": 0, "via": set(), "crypto": 0,
+                                   "own_total": 0, "own_clean": 0})
             a["total"] += 1
+            if cls == "crypto":
+                a["crypto"] += 1
+            if key == "smp-o-" + t:
+                a["own_total"] += 1
+                a["own_clean"] += cls == "clean"
             if cls == "clean":
                 a["authors"].add(p["author"].lower())
                 a["posts"] += 1
@@ -1473,6 +1505,63 @@ def analyze_samples(run, keys=None):
     for a in agg.values():
         a["share"] = round(a["posts"] / a["total"], 2) if a["total"] else 0.0
     return agg, stats
+
+
+def own_evidence(state, t, end):
+    cut = end - timedelta(hours=OWN_CLEAN_MAX_AGE_HOURS)
+    ev = [x for x in state.get("own_clean", {}).get(t, []) if parse_iso(x["at"]) >= cut]
+    return sum(x["n"] for x in ev), sum(x["clean"] for x in ev), ev
+
+
+def update_own_clean(state, run, agg):
+    """Store this run's own-sample tallies (smp-o-<T>) and refresh the pooled prior; prune > max age."""
+    end = parse_iso(run["window_end"])
+    oc = state.setdefault("own_clean", {})
+    for p in run["picks"].get("samples2") or []:
+        if p.get("kind") != "own" or p["key"] not in run["samples"]:
+            continue
+        a = agg.get(p["target"]) or {}
+        n = a.get("own_total", 0)
+        if n:
+            ev = [x for x in oc.get(p["target"], []) if x["at"] != run["window_end"]]
+            ev.append({"at": run["window_end"], "n": n, "clean": a.get("own_clean", 0)})
+            oc[p["target"]] = ev
+    cut = end - timedelta(hours=OWN_CLEAN_MAX_AGE_HOURS)
+    for t in list(oc):
+        oc[t] = [x for x in oc[t] if parse_iso(x["at"]) >= cut]
+        if not oc[t]:
+            del oc[t]
+    n = sum(x["n"] for v in oc.values() for x in v)
+    c = sum(x["clean"] for v in oc.values() for x in v)
+    state["own_clean_prior"] = round(min(0.95, max(0.4, c / n)), 3) if n >= 50 else OWN_CLEAN_DEFAULT_PRIOR
+
+
+def own_clean_estimate(state, t, end):
+    """Smoothed clean share from the ticker's OWN recency samples: (clean + K*prior) / (n + K)."""
+    n, c, ev = own_evidence(state, t, end)
+    prior = state.get("own_clean_prior", OWN_CLEAN_DEFAULT_PRIOR)
+    return round((c + OWN_CLEAN_PRIOR_K * prior) / (n + OWN_CLEAN_PRIOR_K), 3), n
+
+
+def own_sample_targets(run, hourly, state, n):
+    """Tickers most likely ranked high whose clean-share evidence is thinnest/stalest."""
+    if n <= 0:
+        return []
+    end = parse_iso(run["window_end"])
+    pool = {t: 0 for t in run["megacaps"]}
+    for t, rec in hourly["tickers"].items():
+        if rec.get("last_window_end") and parse_iso(rec["last_window_end"]) >= end - timedelta(hours=NODE_MAX_AGE_HOURS):
+            pool[t] = max(pool.get(t, 0), rec.get("last_5h", 0))
+    for t in run["megacaps"]:
+        pool[t] = max(pool[t], (state["tickers"].get(t) or {}).get("mentions", 0))
+    exclude = set(read_list("exclude_tickers.txt"))
+    scored = []
+    for t, m in pool.items():
+        if t in exclude:
+            continue
+        ev_n, _, _ = own_evidence(state, t, end)
+        scored.append((-(m + 1) / (1 + ev_n / 25.0), t))
+    return [t for _, t in sorted(scored)[:n]]
 
 
 def fresh_frontier(run):
@@ -1502,7 +1591,7 @@ def cmd_pick_samples(args):
         scored = sorted(ff, key=lambda x: (-(x[2]["adjusted"] / math.sqrt(len(x[1]["tickers"]))), x[0]))
         n = min(SAMPLE_GROUPS, run["targets"]["samples"], rem)
         picks["samples1"] = [{"key": "smp-" + nid, "kind": "node", "target": nid,
-                              "query": group_query(node["tickers"]), "size": len(node["tickers"]),
+                              "query": sample_query(node["tickers"]), "size": len(node["tickers"]),
                               "heat": round(m["adjusted"] / math.sqrt(len(node["tickers"])), 1)}
                              for nid, node, m in scored[:n]]
         save_run(run)
@@ -1514,7 +1603,8 @@ def cmd_pick_samples(args):
     if pend1 and not args.force:
         sys.exit("stage-1 samples not recorded yet: %s" % ", ".join(pend1))
     if picks["samples2"] is None:
-        n = min(COMENTION_SAMPLES, max(0, run["targets"]["samples"] - len(picks["samples1"])), rem)
+        n_all = min(max(0, run["targets"]["samples"] - len(picks["samples1"])), rem)
+        n = min(COMENTION_SAMPLES, n_all)
         agg, _ = analyze_samples(run)
         mega = set(run["megacaps"])
         hourly = load_hourly()
@@ -1545,8 +1635,14 @@ def cmd_pick_samples(args):
             if t not in chosen:
                 chosen.append(t)
         coll = collisions()
+        chosen = chosen[:n]
+        n_own = n_all - len(chosen)
         picks["samples2"] = [{"key": "smp-c-" + t, "kind": "comention", "target": t,
-                              "query": sample_ticker_query(t, coll)} for t in chosen[:n]]
+                              "query": sample_ticker_query(t, coll)} for t in chosen]
+        own = own_sample_targets(run, hourly, load_state(), n_own)
+        picks["samples2"] += [{"key": "smp-o-" + t, "kind": "own", "target": t, "sort": "recency",
+                               "query": ticker_query(t, coll)} for t in own]
+        chosen = chosen + ["own:" + t for t in own]
         save_run(run)
         print("stage 2 (co-mentions / leaf checks): %s" % (", ".join(chosen[:n]) or "none"))
         print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
@@ -1629,7 +1725,7 @@ def cmd_record_error(args):
         print("STOP: %s. %s" % (msg, stop_advice(run)))
     elif give_up:
         print("GIVE UP on %s (no more retries); it is skipped and reported as missing. Continue with next-call "
-              "after a %ds pause." % (key, PACE_SECONDS))
+              "after a %ds pause." % (key, COOLDOWN_AFTER_GIVE_UP if args.kind == "429" else PACE_SECONDS))
     elif args.kind == "429":
         w = WAIT_429[n429 - 1]
         print("WAIT %ds, then retry the SAME call (%s). Shell: sleep %d  (set block_until_ms >= %d)"
@@ -1803,6 +1899,7 @@ def cmd_build(args):
     state = load_state()
     now = utcnow()
     agg, sstats = analyze_samples(run)
+    update_own_clean(state, run, agg)
     hourly = load_hourly()
     update_hourly(run, hourly, agg, now)
     day = day_of(run["window_end"])
@@ -1836,7 +1933,7 @@ def cmd_build(args):
             "_m1_prev_day": m["momentum_1h_vs_prev_day"],
             "burst": bool(m["burst_idx"]),
             "burst_hours": [hour_iso(run, i) for i in m["burst_idx"]],
-            "rank_score": m["adjusted"],
+            "rank_score_raw": m["adjusted"],
             "hourly": c["buckets"][-WINDOW_HOURS:],
             "last_measured": c["recorded_at"],
         }
@@ -1845,16 +1942,28 @@ def cmd_build(args):
         if p.get("via"):
             e["discovered_via"] = p["via"]
         a = agg.get(t)
+        est, est_n = own_clean_estimate(state, t, parse_iso(run["window_end"]))
+        e["clean_share_est"] = est
+        e["clean_share_own_posts_72h"] = est_n
+        e["mentions_clean_est"] = int(round(m["mentions"] * est))
+        e["rank_score"] = int(round(m["adjusted"] * est))
+        if est_n == 0:
+            labels.append("clean-share-prior")
+        if est < LOW_CLEAN_SHARE:
+            labels.append("low-clean-share")
         if a:
             e["sample_authors"] = len(a["authors"])
             e["sample_posts"] = a["total"]
             if a["total"] >= CLEAN_SHARE_MIN_POSTS:
+                # co-mention dominated (list dumps); informational only, biased low for megacaps
                 e["sample_clean_share"] = a["share"]
-                if p["tier"] == "core" and a["share"] < LOW_CLEAN_SHARE:
-                    labels.append("low-clean-share")
+            if a["total"] >= 5 and a.get("crypto", 0) >= CRYPTO_SHARE_FLAG * a["total"]:
+                labels.append("crypto-collision")
+                if p["tier"] != "core":
+                    e["_held"] = "crypto collision: %d of %d sample posts are crypto" % (a["crypto"], a["total"])
         # clean gate for non-core tickers (discovered passed it when picked; carryover is re-checked
         # against this run's samples when they mention it, otherwise its last passed check is carried)
-        if p["tier"] != "core":
+        if p["tier"] != "core" and "_held" not in e:
             prev = state.get("clean_checks", {}).get(t)
             if a and a["total"] >= CLEAN_SHARE_MIN_POSTS and not clean_ok(a):
                 e["_held"] = "sample: %d posts, %.0f%% clean, %d clean authors" % (a["total"], 100 * a["share"],
@@ -1882,7 +1991,7 @@ def cmd_build(args):
         if e["rank_score"] >= RISER_MIN_MENTIONS and ratio >= RISER_MIN_RATIO:
             e["labels"].append("riser")
             e["_riser_score"] = round(e["rank_score"] * math.log2(ratio), 1)
-    entries.sort(key=lambda e: (-e["rank_score"], -e["mentions"], e["ticker"]))
+    entries.sort(key=lambda e: (-e["rank_score"], -e["rank_score_raw"], e["ticker"]))
     for i, e in enumerate(entries):
         e["rank"] = i + 1
     order = ["rank", "ticker", "cashtag", "mentions", "tier"]
@@ -1974,7 +2083,14 @@ def cmd_build(args):
         "missing_calls": missing_calls(run),
         "partial_reason": partial_reason,
         "x_reads_left_today": run["log"].get("reads_left_today"),
-        "ranking_rule": ("rank_score = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
+        "clean_share_rule": ("clean_share_est = (clean + %d x prior) / (posts + %d) over the ticker's own "
+                             "recency samples of the last %dh; prior = pooled own-sample clean share (%s); "
+                             "mentions_clean_est = mentions x clean_share_est; sample_clean_share is from "
+                             "co-mentions (list dumps) and only informational"
+                             % (OWN_CLEAN_PRIOR_K, OWN_CLEAN_PRIOR_K, OWN_CLEAN_MAX_AGE_HOURS,
+                                state.get("own_clean_prior", OWN_CLEAN_DEFAULT_PRIOR))),
+        "ranking_rule": ("rank_score = round(rank_score_raw x clean_share_est), ties by rank_score_raw. "
+                         "rank_score_raw = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
                          "median, %d) whose next hour fell below a third of it) is capped at that limit; "
                          "only differs from mentions for burst-flagged entries; ties by mentions"
                          % (BURST_FACTOR, BURST_MIN_MEDIAN)),

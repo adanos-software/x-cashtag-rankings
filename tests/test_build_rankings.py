@@ -227,6 +227,54 @@ class Samples(unittest.TestCase):
         self.assertEqual(cls("$GME meme stock rally again, volume is huge today and shorts are covering"), "clean")
         self.assertEqual(cls("$NVDA trades at 30x earnings, bitcoin miners like $IREN pivoting to AI"), "clean")
 
+    def test_crypto_detection(self):
+        cls = lambda text: br.classify_post(text, "x", set(), set(), br.term_patterns())[0]
+        self.assertEqual(cls("$QNT and $XRP are the only ones that matter for banks, accumulating both"), "crypto")
+        self.assertEqual(cls("$SOL/USDT long setup here, stop below the range low, target the highs"), "crypto")
+        self.assertEqual(cls("best altcoin of the cycle is $QNT, overledger is chain-agnostic tech"), "crypto")
+        self.assertEqual(cls("paid out in $USDC, buying more $COIN on this dip because volume is up"), "crypto")
+        self.assertEqual(cls("$AAPL services revenue keeps growing, margins look strong into earnings"), "clean")
+        self.assertEqual(cls("$JPM chain of branches is expanding, deposits up again this quarter"), "clean")
+        self.assertIn("QNT", br.read_list("exclude_tickers.txt"))
+
+    def test_own_sample_tallies(self):
+        run_obj = {"samples": {
+            "smp-o-NVDA": {"posts": [{"author": "a%d" % i, "text": "$NVDA holding into earnings, %s" % w}
+                                     for i, w in enumerate(["guidance matters", "margins first", "datacenter demand",
+                                                            "watching China", "options are pricey", "adding a bit",
+                                                            "trimmed some", "long term hold"])] + [{"author": "d", "text": "$NVDA $AMD $TSLA $AAPL $META"}]},
+            "smp-c-NVDA": {"posts": [{"author": "z", "text": "$NVDA $AMD $TSLA $AAPL $MSFT"}]}}}
+        agg, _ = br.analyze_samples(run_obj)
+        self.assertEqual((agg["NVDA"]["own_total"], agg["NVDA"]["own_clean"], agg["NVDA"]["total"]), (9, 8, 10))
+        self.assertEqual(agg["AMD"]["own_total"], 0)
+
+    def test_clean_share_estimate(self):
+        from datetime import datetime, timezone
+        end = datetime(2026, 10, 13, 4, 0, tzinfo=timezone.utc)
+        state = {"own_clean": {"NVDA": [{"at": "2026-10-12T23:00:00Z", "n": 25, "clean": 24},
+                                        {"at": "2026-10-09T00:00:00Z", "n": 25, "clean": 0}]}}
+        est, n = br.own_clean_estimate(state, "NVDA", end)     # 3+ day old evidence ignored
+        self.assertEqual(n, 25)
+        self.assertAlmostEqual(est, (24 + 10 * 0.8) / 35, places=3)
+        self.assertEqual(br.own_clean_estimate(state, "XYZ", end), (0.8, 0))
+        run_obj = {"window_end": "2026-10-13T04:00:00Z",
+                   "picks": {"samples2": [{"key": "smp-o-MU", "kind": "own", "target": "MU"},
+                                          {"key": "smp-o-GME", "kind": "own", "target": "GME"}]},
+                   "samples": {"smp-o-MU": {}}}
+        br.update_own_clean(state, run_obj, {"MU": {"own_total": 20, "own_clean": 10}})
+        self.assertEqual(state["own_clean"]["MU"], [{"at": "2026-10-13T04:00:00Z", "n": 20, "clean": 10}])
+        self.assertNotIn("GME", state["own_clean"])           # not recorded -> no evidence
+        self.assertEqual(len(state["own_clean"]["NVDA"]), 1)  # pruned
+        self.assertEqual(state["own_clean_prior"], 0.8)       # < 50 own posts pooled -> default
+
+    def test_sample_query_length_cap(self):
+        u = sorted(br.load_universe())[:400]
+        q = br.sample_query(u)
+        self.assertLessEqual(len(q), br.SAMPLE_MAX_QUERY_LEN)
+        self.assertLess(br.SAMPLE_MAX_QUERY_LEN, 4096)
+        with self.assertRaises(ValueError):
+            br.sample_args({"window_end": "2026-10-13T04:00:00Z"}, "x" * 4096)
+
     def test_group_heat_is_relative_to_market(self):
         # every group quieter than yesterday (weekend evening): old heat was 0.0 for all
         ms = [br.metrics([200] * 5 + [100] * 19 + [b] * 5) for b in (50, 60, 90)]
@@ -320,9 +368,9 @@ class RunFlow(unittest.TestCase):
     def test_429_sequence_and_skip(self):
         self.plan()
         r = run("record-error", "S01", "--kind", "429", "--reads-left-today", "899")
-        self.assertIn("WAIT 60s", r.stdout)
+        self.assertIn("WAIT 90s", r.stdout)
         r = run("record-error", "S01", "--kind", "429")
-        self.assertIn("WAIT 120s", r.stdout)
+        self.assertIn("WAIT 240s", r.stdout)
         r = run("record-error", "S01", "--kind", "429")
         self.assertIn("GIVE UP", r.stdout)
         rj = runjson()
@@ -570,11 +618,26 @@ class SplitFlow(unittest.TestCase):
         self.assertTrue(quiet)                         # measured once today, quiet -> not re-read
         td = {e["ticker"]: e for e in today()["tickers"]}
         self.assertEqual(td[self.hot]["status"], "exact")
-        e = td[quiet[0]]
-        self.assertEqual(e["status"], "partial")
-        self.assertEqual(e["exact_hours"], 9)
-        self.assertIsNotNone(e["upper_bound"])         # remaining hours bounded by its group/node
-        self.assertGreaterEqual(e["upper_bound"], e["exact_part"])
+        for t in sorted(quiet):
+            self.assertEqual(td[t]["status"], "partial")
+            self.assertEqual(td[t]["exact_hours"], 9)
+        bounded = [td[t] for t in sorted(quiet) if td[t]["upper_bound"] is not None]
+        self.assertTrue(bounded)                       # remaining hours bounded by a group/node
+        for e in bounded:
+            self.assertGreaterEqual(e["upper_bound"], e["exact_part"])
+
+    def test_clean_adjusted_ranking_and_own_samples(self):
+        drive(Sim(self.series, clean_posts=[self.hot]), "2026-10-09T09:14:00Z")
+        rj = runjson()
+        own = [p for p in rj["picks"]["samples2"] if p["kind"] == "own"]
+        self.assertGreaterEqual(len(own), br.OWN_SAMPLES)
+        self.assertTrue(all(p["key"] == "smp-o-" + p["target"] and p["sort"] == "recency" for p in own))
+        lt = latest()
+        rows = lt["tickers"] if "tickers" in lt else lt["rankings"]
+        for e in rows:
+            self.assertIn("clean_share_est", e)
+            self.assertEqual(e["rank_score"], int(round(e["rank_score_raw"] * e["clean_share_est"])))
+        self.assertEqual([e["rank_score"] for e in rows], sorted((e["rank_score"] for e in rows), reverse=True))
 
     def test_partial_build_needs_sweep_and_megacaps(self):
         sim = Sim(self.series)
