@@ -14,6 +14,16 @@ TMP = tempfile.mkdtemp(prefix="xcr-test-")
 for d in ("scripts", "config", "data"):
     shutil.copytree(os.path.join(REPO, d), os.path.join(TMP, d))
 os.environ["XCR_ROOT"] = TMP
+MODE_FILE = os.path.join(TMP, "data", "query_mode.json")
+
+
+def set_mode(mode):
+    """The method-v3 tests run in cashtag mode; the bare-ticker tests switch to bare and back."""
+    with open(MODE_FILE, "w") as f:
+        json.dump({"mode": mode, "since": "2026-10-17T04:23:20Z", "history": []}, f)
+
+
+set_mode("cashtag")
 spec = importlib.util.spec_from_file_location("br", os.path.join(TMP, "scripts", "build_rankings.py"))
 br = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(br)
@@ -69,12 +79,14 @@ class Budget(unittest.TestCase):
     def test_default_split(self):
         t, ok = br.size_run(95, 13, 14)
         self.assertTrue(ok)
-        self.assertEqual(t, {"stock_groups": 13, "megacaps": 10, "etf_groups": 3, "splits": 24, "samples": 10,
-                             "spare": 4, "dailies": 31})
+        self.assertEqual(t, {"probe": 0, "stock_groups": 13, "megacaps": 10, "etf_groups": 3, "splits": 24,
+                             "samples": 12, "spare": 4, "dailies": 29})
+        t, ok = br.size_run(95, 10, 11, 18, 1)          # bare mode: probe + 10 megacaps + 8 context tickers
+        self.assertEqual((t["probe"], t["megacaps"], t["dailies"], sum(t.values())), (1, 18, 23, 95))
 
     def test_dailies_then_splits_shrink_first(self):
         t, ok = br.size_run(70, 13, 14)
-        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (10, 20, 10, 10))
+        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (10, 18, 10, 12))
         self.assertEqual(sum(t.values()), 70)
         t, ok = br.size_run(40, 13, 14)
         self.assertEqual(sum(t.values()), 40)
@@ -435,9 +447,13 @@ class Sim:
         self.spam = set(spam_posts)
         self.overlap = overlap or {}      # (A, B) -> per-hour posts mentioning both
         self.reads = 0
+        self.dollar_removed = "yes"       # bare mode probe answer
 
     def tickers(self, q):
-        return re.findall(r"\$([A-Z]+)", q.split(" -is:retweet")[0])
+        q0 = q.split(" -is:retweet")[0]
+        if q0.startswith("("):
+            return [x.lstrip("$") for x in q0[1:q0.index(")")].split(" OR ")]
+        return [q0.split()[0].lstrip("$")]          # single ticker (bare context query: "META (stock OR ...)")
 
     def count(self, q):
         self.reads += 1
@@ -483,7 +499,7 @@ def drive(sim, now, left=900, until=None, max_steps=500):
                 if tool == "get_posts_counts_recent":
                     b = sim.count(a["query"])
                     br.cmd_record(NS(pairs=["%s=%d:%s" % (key, sum(b), ",".join(map(str, b)))], no_sleep=True,
-                                     extra_reads=0))
+                                     extra_reads=0, dollar_removed=sim.dollar_removed if key == "PROBE" else None))
                 else:
                     lines = sim.posts(a["query"])
                     f = os.path.join(TMP, "lines.txt")
@@ -762,6 +778,102 @@ class Subtraction(unittest.TestCase):
     def test_split_tickers(self):
         self.assertEqual([len(x) for x in br.split_tickers(list("ABCDEFGHIJ"))], [3, 3, 2, 2])
         self.assertEqual(br.split_tickers(list("AB")), [["A"], ["B"]])
+
+class BareMode(unittest.TestCase):
+    """Method v4: the x tools strip '$' since 2026-10-17 -> bare-ticker queries, ambiguity rules, probe."""
+
+    def setUp(self):
+        reset_data()
+        set_mode("bare")
+
+    def tearDown(self):
+        set_mode("cashtag")
+        shutil.copy(os.path.join(REPO, "data", "latest.json"), os.path.join(TMP, "data", "latest.json"))
+
+    def test_queries_have_no_dollar_and_skip_ambiguous(self):
+        self.assertTrue(br.ticker_query("NVDA").startswith("NVDA -is:retweet"))
+        q = br.ticker_query("META")
+        self.assertTrue(q.startswith("META (stock OR stocks OR shares"), q)
+        self.assertNotIn("$", br.group_query(["AAPL", "NVDA"]).split(" -is:")[0])
+        nm = br.not_measurable()
+        for t in ("A", "ALL", "NOW", "ON", "IT", "ARE", "CAN", "FUN", "GO", "CAR", "SO", "OPEN", "AI"):
+            self.assertIn(t, nm, t)
+        for t in ("NVDA", "AAPL", "TSLA", "AMD", "PLTR", "IREN"):
+            self.assertNotIn(t, br.ambiguous_tickers(), t)
+        stock, etf, st, et = br.current_packing(br.load_universe())
+        swept = set(st) | set(et)
+        self.assertFalse(swept & set(nm))
+        self.assertFalse(swept & set(br.context_tickers()))
+        for g in stock + etf:
+            self.assertLessEqual(len(br.group_query(g)), br.MAX_QUERY_LEN)
+        mega = br.megacap_list()
+        self.assertEqual(mega[:10], br.read_list("megacaps.txt")[:10])
+        self.assertIn("MU", mega)                       # context ticker: counted individually every run
+        self.assertEqual(run("check").returncode, 0)
+
+    def test_real_mention_rule(self):
+        self.assertTrue(br.real_mention("$META to 800 next week", "META", ["META"]))
+        self.assertTrue(br.real_mention("META calls ripping into earnings", "META", []))
+        self.assertFalse(br.real_mention("meta calls ripping into earnings", "META", []))   # context: upper case
+        self.assertFalse(br.real_mention("the META is broken in this game", "META", []))
+        self.assertTrue(br.real_mention("nvda earnings next week, holding shares", "NVDA", []))
+        self.assertTrue(br.real_mention("NVDA and $AMD both up big today", "NVDA", ["AMD"]))
+        self.assertFalse(br.real_mention("NVDA keynote was fun to watch tonight", "NVDA", []))
+
+    def test_own_sample_denominator_is_every_post(self):
+        posts = ["META stock is up again after earnings, adding shares", "the meta in this game is so boring now",
+                 "Meta should fix my instagram account already please", "$META breaking out over 760 resistance"]
+        run_obj = {"samples": {"smp-o-META": {"posts": [{"author": "u%d" % i, "text": t}
+                                                         for i, t in enumerate(posts)]}}}
+        agg, st = br.analyze_samples(run_obj)
+        self.assertEqual((agg["META"]["own_total"], agg["META"]["own_clean"]), (4, 2))
+        self.assertEqual(st["smp-o-META"]["own_real"], 2)
+
+    def test_probe_switches_back_to_cashtag_when_dollar_works(self):
+        self.assertEqual(run("plan", "--now", "2026-10-17T09:14:00Z", "--reads-left-today", "900").returncode, 0)
+        r = run("next-call")
+        self.assertIn("## PROBE", r.stdout)
+        self.assertIn('"query": "$NVDA -is:retweet"', r.stdout)
+        b = ",".join(["5"] * 29)
+        r = run("record", "PROBE=145:" + b, "--no-sleep")
+        self.assertNotEqual(r.returncode, 0)            # the answer to "was the $ removed?" is required
+        r = run("record", "PROBE=145:" + b, "--dollar-removed", "yes", "--no-sleep")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(br.query_mode(), "bare")
+        self.assertIn("## S01", run("next-call").stdout)
+        # next run: the tool no longer says the $ was removed -> cashtag again, automatically
+        run("plan", "--now", "2026-10-17T14:14:00Z", "--reads-left-today", "800")
+        r = run("record", "PROBE=145:" + b, "--dollar-removed", "no", "--no-sleep")
+        self.assertIn("MODE SWITCH: bare -> cashtag", r.stdout)
+        self.assertEqual(br.query_mode(), "cashtag")
+        self.assertIsNotNone(runjson()["stopped"])
+        run("abandon", "--reason", "query mode switched to cashtag")
+        run("plan", "--now", "2026-10-17T14:14:00Z", "--reads-left-today", "799")
+        rj = runjson()
+        self.assertFalse(rj["probe"])
+        self.assertTrue(rj["groups"][0]["query"].startswith("($"))
+        # and if the $ is stripped again while in cashtag mode -> bare
+        r = run("record-error", "S01", "--kind", "other", "--dollar-removed", "yes", "--detail", "$ was removed")
+        self.assertIn("MODE SWITCH: cashtag -> bare", r.stdout)
+        self.assertEqual(br.query_mode(), "bare")
+
+    def test_bare_flow_publishes_with_method_note(self):
+        series = {"NVDA": [60] * 29, "META": [40] * 29, "MU": [30] * 29, "AAPL": [20] * 29}
+        self.assertEqual(drive(Sim(series, clean_posts=["NVDA", "META"]), "2026-10-17T09:14:00Z"), "built")
+        lt = latest()
+        self.assertEqual(lt["query_mode"], "bare")
+        self.assertEqual(lt["method_version"], 4)
+        self.assertIn("2026-10-17", lt["method_note"]["counting_changed"])
+        self.assertIn("not directly comparable", lt["method_note"]["counting_changed"].lower())
+        self.assertGreater(lt["not_measurable"]["count"], 1000)
+        self.assertEqual(lt["x_reads_breakdown"]["mode_probe"], 1)
+        rows = {e["ticker"]: e for e in lt["rankings"]}
+        self.assertIn("context-required", rows["META"]["labels"])
+        self.assertFalse(set(rows) & set(br.not_measurable()))
+        self.assertEqual(today()["method_note"]["query_mode"], "bare")
+        st = json.load(open(os.path.join(TMP, "data", "state.json")))
+        self.assertEqual(st["own_clean_mode"], "bare")
+        self.assertEqual(json.load(open(os.path.join(TMP, "data", "splits.json")))["query_mode"], "bare")
 
 
 if __name__ == "__main__":

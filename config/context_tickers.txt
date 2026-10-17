@@ -1,0 +1,16 @@
+# Bare-ticker mode (since 2026-10-17): ambiguous core/megacap tickers that are still counted, but ONLY with a
+# finance-context clause:  TICKER (<config/context_terms.txt joined by OR>) <spam suffix>
+# They are left out of the group sweep and counted individually every run (like the megacaps), get the label
+# "context-required", and are scaled by their own-sample clean share like every other ticker.
+# Test 2026-10-17 (1 read): bare META recency sample 3/25 about the stock; META + context 15/25 stock/company.
+# Ambiguous tickers NOT listed here (OPEN, AI, NET, APP, DIA, SHOP, BA, BE, ...) are not measurable.
+META
+SPY
+MU
+HOOD
+COIN
+ARM
+AMC
+UBER
+SNOW
+RIOT
