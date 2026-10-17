@@ -26,10 +26,13 @@ MANUAL_EXTRA = {"SMH", "LOL", "OMG", "WTF", "IMO", "FOMO", "YOLO", "HODL", "MOON
                 "USA", "NYC", "ATH", "EPS", "IPO", "ETF", "GDP", "CPI", "FED", "SEC", "FBI", "CIA", "NBA", "NFL",
                 "UFC", "WWE", "TV", "PC", "UK", "EU", "LIT", "LITE", "AERO", "PILL", "DOG", "CAT", "FUN", "CAR",
                 # 2026-10-17 first bare run: SOFI 3,080 bare vs 141 $SOFI the run before (name Sofi/Sofia, SoFi Stadium)
-                "SOFI"}
+                "SOFI",
+                # 2026-10-17 11:17 run (bare 5h vs median $cashtag 5h): SHOP 10,901 vs 21 (the word "shop"),
+                # BABA 6,669 vs 34, MARA 1,783 vs 27, NIO 353 vs 35, CRM 296 vs 20.5, PDD 140 vs 6.5
+                "SHOP", "BABA", "MARA", "NIO", "PDD", "CRM"}
 # frequent in the corpus only because of the company / ticker itself
-ALLOW = {"AMD", "CRM", "MARA", "BABA", "MRNA", "IBM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG",
-         "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "RIVN", "HIMS", "NIO", "PDD"}
+ALLOW = {"AMD", "MRNA", "IBM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG",
+         "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "RIVN", "HIMS"}
 
 
 def classify(t):
@@ -51,6 +54,13 @@ def classify(t):
 
 def main():
     rows = list(csv.DictReader(open(os.path.join(ROOT, "data", "universe.csv"), encoding="utf-8")))
+    # core tickers missing from the universe file (e.g. SHOP) are counted too, so they must be classified as well
+    have = {r["ticker"] for r in rows}
+    for line in open(os.path.join(ROOT, "config", "core_tickers.txt"), encoding="utf-8"):
+        t = line.split("#")[0].strip().upper()
+        if t and t not in have:
+            rows.append({"ticker": t})
+            have.add(t)
     out = []
     for r in rows:
         why = classify(r["ticker"])

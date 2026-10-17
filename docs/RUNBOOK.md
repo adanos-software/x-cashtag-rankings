@@ -18,6 +18,12 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   `scripts/gen_ambiguous.py`; e.g. A, ALL, NOW, ON, IT, ARE, CAN, FUN, GO, CAR, SO, OPEN, AI, NET). They are not swept and not ranked.
   A few big ambiguous core names (`config/context_tickers.txt`: META SPY MU HOOD COIN ARM AMC UBER SNOW RIOT) are counted every run
   with a required finance-context clause and get the label `context-required`.
+- **Word-collision guard (automatic, nothing to do in the loop):** the build holds back tickers whose bare count is > 8x their
+  median `$cashtag` 5h count before 2026-10-17 (bare >= 50), or > 300 with no cashtag history (`held_back`, label
+  `suspected-word-collision`), and queues them (`state.json` -> `collision_queue`) for own samples in the next run
+  (`pick-samples` stage 2 puts them first, at most half of the own slots; `pick-candidates` counts them again as
+  `collision-check`). >= 30% real mentions in >= 10 own sampled posts -> ranked (`collision-check-passed`). Report held-back
+  tickers. If a clearly real name is held, or a word collision gets through, do not edit thresholds in the run: report it.
 - **Probe + automatic switch back (every bare run):** the first call of a bare run is `PROBE`, the query `$NVDA -is:retweet`.
   - Look at the tool output. If it contains **`$ was removed from query`**, record it with `--dollar-removed yes`
     (`record PROBE=<TOTAL>:<29 buckets> --dollar-removed yes --reads-left-today B`) and continue normally.

@@ -876,5 +876,67 @@ class BareMode(unittest.TestCase):
         self.assertEqual(json.load(open(os.path.join(TMP, "data", "splits.json")))["query_mode"], "bare")
 
 
+class CollisionGuard(unittest.TestCase):
+    """Bare mode: bare counts far above the $cashtag history are held back as suspected word collisions."""
+
+    def setUp(self):
+        reset_data()
+        set_mode("bare")
+        br._CASHTAG_BASE = None
+
+    def tearDown(self):
+        set_mode("cashtag")
+        br._CASHTAG_BASE = None
+
+    def test_thresholds_on_the_1117_run(self):
+        # 2026-10-17 11:17 Berlin run (04-09Z), bare 5h counts; baseline = repo $cashtag history before 10-17
+        held = {"SHOP": 10901, "BABA": 6669, "MARA": 1783, "NIO": 353, "CRM": 296, "PDD": 140, "SOFI": 1760}
+        kept = {"TSLA": 1153, "AMD": 965, "NVDA": 801, "QQQ": 596, "CRWV": 368, "IREN": 329, "NBIS": 302,
+                "AAPL": 301, "MSTR": 271, "ASML": 246, "XOM": 126}
+        for t, m in held.items():
+            self.assertIsNotNone(br.collision_trigger(t, m), t)
+        for t, m in kept.items():
+            self.assertIsNone(br.collision_trigger(t, m), t)
+        self.assertIn("no $cashtag history", br.collision_trigger("HAIN", 8028))
+        self.assertIsNone(br.collision_trigger("HASI", 152))
+        for t in ("SHOP", "BABA", "MARA", "NIO", "CRM", "PDD", "SOFI"):
+            self.assertIn(t, br.not_measurable(), t)
+
+    def test_small_counts_and_bare_history_are_ignored(self):
+        br._CASHTAG_BASE = {"TINY": (2, 10)}
+        self.assertIsNone(br.collision_trigger("TINY", 40))          # 20x, but below the minimum bare count
+        self.assertIsNotNone(br.collision_trigger("TINY", 60))
+        br._CASHTAG_BASE = None
+        base = br.cashtag_baseline()
+        # the bare-rewritten daily/2026-10-16.json and the bare history files never count as $cashtag history
+        self.assertLess(base["SOFI"][0], 1000)
+
+    def test_own_sample_clears_or_confirms(self):
+        end = br.parse_iso("2026-10-17T14:00:00Z")
+        br._CASHTAG_BASE = {"ZZZQ": (10, 20)}
+        st = {"own_clean_mode": "bare", "own_clean": {}}
+        d = br.collision_decision(st, "ZZZQ", 500, end)
+        self.assertEqual((d["label"], d["queue"]), ("suspected-word-collision", True))
+        st["own_clean"]["ZZZQ"] = [{"at": "2026-10-17T09:00:00Z", "n": 25, "clean": 4}]
+        d = br.collision_decision(st, "ZZZQ", 500, end)
+        self.assertEqual((d["label"], d["queue"]), ("suspected-word-collision", False))
+        self.assertIn("16% real", d["held"])
+        st["own_clean"]["ZZZQ"] = [{"at": "2026-10-17T09:00:00Z", "n": 25, "clean": 9}]
+        d = br.collision_decision(st, "ZZZQ", 500, end)
+        self.assertEqual(d["label"], "collision-check-passed")
+        self.assertIsNone(d["held"])
+        self.assertIsNone(br.collision_decision(st, "ZZZQ", 70, end))
+
+    def test_queue_gets_own_samples_first(self):
+        run_obj = {"window_end": "2026-10-17T09:00:00Z", "megacaps": ["NVDA", "TSLA", "QQQ"]}
+        hourly = {"tickers": {}}
+        st = {"tickers": {}, "own_clean_mode": "bare", "own_clean": {},
+              "collision_queue": [{"ticker": t} for t in ("HAIN", "HAO", "HAVA", "SHOP")]}
+        own = br.own_sample_targets(run_obj, hourly, st, 6)
+        self.assertEqual(own[:3], ["HAIN", "HAO", "HAVA"])          # SHOP: not measurable, never sampled
+        self.assertEqual(len(own), 6)
+        self.assertNotIn("SHOP", own)
+
+
 if __name__ == "__main__":
     unittest.main()

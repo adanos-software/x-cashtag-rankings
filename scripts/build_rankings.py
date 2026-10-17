@@ -25,6 +25,7 @@ Every count read uses granularity=hour over the last 29 full UTC hours.
 """
 import argparse
 import csv
+import glob
 import io
 import json
 import math
@@ -110,6 +111,15 @@ MIN_AUTHORS = 3              # a sampled ticker needs >= 3 distinct authors of C
 MIN_CLEAN_SHARE = 0.3        # ... and >= 30% of the sampled posts mentioning it must be clean
 CLEAN_SHARE_MIN_POSTS = 5    # a clean share is only reported/used with >= 5 sampled posts mentioning the ticker
 LOW_CLEAN_SHARE = 0.3        # core entries below this get the label "low-clean-share" (rank unchanged)
+# word-collision guard (bare mode, 2026-10-17; tuned on the 11:17 Berlin run 04-09Z: SHOP 10,901 / BABA 6,669 /
+# MARA 1,783 / NIO 353 / CRM 296 / PDD 140 bare were 10-520x their median $cashtag 5h count, while TSLA, AMD,
+# NVDA, QQQ, CRWV were 1.2-4.7x; AMD 5.4x and XOM 6.3x in the 07:48 run are the closest real names)
+COLLISION_RATIO = 8.0             # bare 5h count > 8x the median $cashtag 5h count before the switch -> suspected
+COLLISION_RATIO_MIN_BARE = 50     # ... only for bare counts >= 50 (tiny counts: ratios are noise, rank is low)
+COLLISION_NO_HISTORY_MIN = 300    # no $cashtag history at all and bare 5h count > 300 -> suspected
+COLLISION_MIN_REAL_SHARE = 0.3    # an own sample with >= 30% real mentions clears a suspected ticker
+COLLISION_MIN_OWN_POSTS = 10      # ... from >= 10 own sampled posts (72h)
+COLLISION_QUEUE_SHARE = 0.5       # queued suspected tickers take at most this share of the own-sample slots
 CLEAN_CHECK_MAX_AGE_HOURS = 24   # a carryover ticker's last passed clean check may be at most this old
 MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are always a ticker dump
 DUMP_MIN_CASHTAGS = 4        # posts with >= 4 cashtags ...
@@ -732,6 +742,9 @@ def daily_entries(hourly, day, through, universe, core, mega):
                                          % (a["total"], 100 * a["share"], len(a["authors"])))
         else:
             e["held_back"] = False
+        if t in _COLLISION_HELD:
+            e["held_back"] = True
+            e["held_back_reason"] = _COLLISION_HELD[t]
         wins = {}
         for w in windows:
             we = parse_iso(w)
@@ -745,6 +758,20 @@ def daily_entries(hourly, day, through, universe, core, mega):
                               (e["exact_part"] or 0) if e["status"] == "partial" else -1),
                             -(e["upper_bound"] or 0), e["ticker"]))
     return out, hours
+
+
+def collision_guard_rule():
+    return {"label": "suspected-word-collision",
+            "rule": ("bare mode: a ticker is held back when its bare 5h count is > %gx the median of its $cashtag 5h "
+                     "counts before %s (only for bare counts >= %d), or when it has no $cashtag history and the bare "
+                     "count is > %d; it is queued for an own recency sample in the next run and ranked (with the "
+                     "cleaned estimate, label collision-check-passed) once >= %d own sampled posts in 72h show >= "
+                     "%.0f%% real mentions" % (COLLISION_RATIO, BARE_SINCE, COLLISION_RATIO_MIN_BARE,
+                                               COLLISION_NO_HISTORY_MIN, COLLISION_MIN_OWN_POSTS,
+                                               100 * COLLISION_MIN_REAL_SHARE)),
+            "ratio": COLLISION_RATIO, "ratio_min_bare": COLLISION_RATIO_MIN_BARE,
+            "no_history_min": COLLISION_NO_HISTORY_MIN, "min_real_share": COLLISION_MIN_REAL_SHARE,
+            "min_own_posts": COLLISION_MIN_OWN_POSTS}
 
 
 def method_note():
@@ -1728,6 +1755,74 @@ def own_mode_ok(state):
     return state.get("own_clean_mode", "cashtag") == query_mode()
 
 
+_CASHTAG_BASE = None
+_COLLISION_HELD = {}   # ticker -> reason, set by build for daily/today files
+
+
+def cashtag_baseline():
+    """ticker -> (median $cashtag 5h count, n windows) from history/ and daily/ files before the bare switch."""
+    global _CASHTAG_BASE
+    if _CASHTAG_BASE is not None:
+        return _CASHTAG_BASE
+    wins = {}
+    for f in sorted(glob.glob(os.path.join(HISTORY_DIR, "*.json"))):
+        if os.path.basename(f) >= BARE_SINCE:
+            continue
+        d = load_json(f, {}) or {}
+        if (d.get("method_version") or 0) >= 4 or d.get("query_mode") == "bare":
+            continue
+        for e in (d.get("rankings") or []) + (d.get("held_back") or []):
+            if e.get("mentions") is not None:
+                wins.setdefault(e["ticker"], {})[d.get("window_end")] = e["mentions"]
+    for f in sorted(glob.glob(os.path.join(DAILY_DIR, "*.json"))):
+        if os.path.basename(f) >= BARE_SINCE:
+            continue
+        d = load_json(f, {}) or {}
+        mn = d.get("method_note")
+        if isinstance(mn, dict) and mn.get("query_mode") == "bare":
+            continue    # a daily file rewritten from bare hourly data (e.g. 2026-10-16.json) is not $cashtag history
+        for e in d.get("tickers") or []:
+            for w, v in (e.get("windows_5h") or {}).items():
+                wins.setdefault(e["ticker"], {}).setdefault(w, v)
+    _CASHTAG_BASE = {t: (statistics.median(v.values()), len(v)) for t, v in wins.items() if v}
+    return _CASHTAG_BASE
+
+
+def collision_trigger(t, mentions):
+    """Reason string if a bare count looks like a word collision (vs the $cashtag history), else None."""
+    base = cashtag_baseline().get(t)
+    if base is None:
+        if mentions > COLLISION_NO_HISTORY_MIN:
+            return "no $cashtag history and bare count %d > %d" % (mentions, COLLISION_NO_HISTORY_MIN)
+        return None
+    med, n = base
+    if mentions >= COLLISION_RATIO_MIN_BARE and mentions > COLLISION_RATIO * max(med, 1):
+        return "bare count %d = %.1fx the median $cashtag 5h count %g (%d windows before %s), > %gx" % (
+            mentions, mentions / max(med, 1), med, n, BARE_SINCE, COLLISION_RATIO)
+    return None
+
+
+def collision_decision(state, t, mentions, end):
+    """None if not suspected; else {"check", "label", "held" (reason or None), "queue" (needs an own sample)}."""
+    why = collision_trigger(t, mentions)
+    if not why:
+        return None
+    on, oc, _ = own_evidence(state, t, end)
+    share = oc / on if on else None
+    check = {"reason": why, "own_sample_posts_72h": on,
+             "own_real_share": round(share, 2) if share is not None else None}
+    if on >= COLLISION_MIN_OWN_POSTS and share >= COLLISION_MIN_REAL_SHARE:
+        return {"check": check, "label": "collision-check-passed", "held": None, "queue": False}
+    held = "suspected-word-collision: %s; %s" % (
+        why, ("own sample %d posts, %.0f%% real mentions (< %.0f%%)" % (on, 100 * share, 100 * COLLISION_MIN_REAL_SHARE))
+        if on >= COLLISION_MIN_OWN_POSTS else "no own sample yet -> queued for one next run")
+    return {"check": check, "label": "suspected-word-collision", "held": held, "queue": on < COLLISION_MIN_OWN_POSTS}
+
+
+def collision_queue(state):
+    return [q["ticker"] for q in state.get("collision_queue", []) if q["ticker"] not in excluded_tickers()]
+
+
 def own_evidence(state, t, end):
     if not own_mode_ok(state):
         return 0, 0, []
@@ -1777,6 +1872,10 @@ def own_sample_targets(run, hourly, state, n):
     if n <= 0:
         return []
     end = parse_iso(run["window_end"])
+    queued = collision_queue(state)[:max(1, int(n * COLLISION_QUEUE_SHARE))] if bare() else []
+    n -= len(queued)
+    if n <= 0:
+        return queued
     pool = {t: 0 for t in run["megacaps"]}
     for t, rec in hourly["tickers"].items():
         if rec.get("last_window_end") and parse_iso(rec["last_window_end"]) >= end - timedelta(hours=NODE_MAX_AGE_HOURS):
@@ -1788,9 +1887,11 @@ def own_sample_targets(run, hourly, state, n):
     for t, m in pool.items():
         if t in exclude:
             continue
+        if t in queued:
+            continue
         ev_n, _, _ = own_evidence(state, t, end)
         scored.append((-(m + 1) / (1 + ev_n / 25.0), t))
-    return [t for _, t in sorted(scored)[:n]]
+    return queued + [t for _, t in sorted(scored)[:n]]
 
 
 def fresh_frontier(run):
@@ -2030,6 +2131,13 @@ def cmd_pick_candidates(args):
         taken.add(t)
         picks.append({"ticker": t, "tier": "core" if t in core else "discovered", "source": source, "via": via})
 
+    # suspected word collisions that got their own sample in this run are counted again, so the build can
+    # rank them as soon as the sample clears them (bare mode)
+    if bare():
+        queued = set(collision_queue(load_state()))
+        for sp in run["picks"].get("samples2") or []:
+            if sp.get("kind") == "own" and sp["target"] in queued and sp["key"] in run["samples"]:
+                add(sp["target"], "collision-check", None)
     core_min = min(CORE_DAILY_MIN, len(core_due), slots)
     discover = slots - core_min
     lists = [("split-leaf", leaf), ("sample", sample), ("hot-reread", hot)]
@@ -2201,6 +2309,16 @@ def cmd_build(args):
                 labels.append("crypto-collision")
                 if p["tier"] != "core":
                     e["_held"] = "crypto collision: %d of %d sample posts are crypto" % (a["crypto"], a["total"])
+        # word-collision guard (bare mode): a bare count far above the $cashtag history (or high without any)
+        # is held back until an own sample shows >= 30% real mentions; then it is ranked with the cleaned estimate
+        if bare() and "_held" not in e:
+            cc = collision_decision(state, t, m["mentions"], parse_iso(run["window_end"]))
+            if cc:
+                e["collision_check"] = cc["check"]
+                labels.append(cc["label"])
+                if cc["held"]:
+                    e["_held"] = cc["held"]
+                    e["_collision_queue"] = cc["queue"]
         # clean gate for non-core tickers (discovered passed it when picked; carryover is re-checked
         # against this run's samples when they mention it, otherwise its last passed check is carried)
         if p["tier"] != "core" and "_held" not in e:
@@ -2222,6 +2340,11 @@ def cmd_build(args):
         entries.append(e)
     held = [e for e in entries if "_held" in e]
     entries = [e for e in entries if "_held" not in e]
+    _COLLISION_HELD.clear()
+    _COLLISION_HELD.update({e["ticker"]: e["_held"] for e in held if "collision_check" in e})
+    state["collision_queue"] = [{"ticker": e["ticker"], "mentions": e["mentions"], "window_end": run["window_end"],
+                                 "reason": e["collision_check"]["reason"]}
+                                for e in sorted(held, key=lambda e: -e["mentions"]) if e.get("_collision_queue")]
     # risers
     for e in entries:
         m1 = e["momentum_last_hour_vs_prev_9h"] or 0
@@ -2405,7 +2528,11 @@ def cmd_build(args):
                                    "entries below %.0f%% get the label low-clean-share" % (100 * LOW_CLEAN_SHARE)),
         },
         "held_back": [{"ticker": e["ticker"], "mentions": e["mentions"], "tier": e["tier"], "source": e["source"],
-                       "reason": e["_held"]} for e in sorted(held, key=lambda e: -e["mentions"])],
+                       "reason": e["_held"], **({"labels": e["labels"], "collision_check": e["collision_check"]}
+                                                if "collision_check" in e else {})}
+                      for e in sorted(held, key=lambda e: -e["mentions"])],
+        "word_collision_guard": collision_guard_rule() if bare() else None,
+        "collision_queue": [q["ticker"] for q in state.get("collision_queue", [])] if bare() else [],
         "universe_source": {
             "repo": umeta.get("source_repo", FTD_REPO),
             "file": umeta.get("source_file", FTD_FILE),
