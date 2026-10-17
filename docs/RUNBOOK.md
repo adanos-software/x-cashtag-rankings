@@ -2,10 +2,10 @@
 
 Owner: Alexander Schneider (Adanos Software GmbH). The repo is public; publish straight to `main` (the owner approved this).
 Schedule: every 5 hours at **01:14, 06:14, 11:14, 16:14 and 21:14 Europe/Berlin**. Data timestamps stay UTC.
-A run is about **95 planned X reads, plus at most 10 retry reads (max ~105)**. The script plans everything. You make **one X call at
+A run is about **90 planned X reads, plus at most 10 retry reads (max 100)**. The script plans everything. You make **one X call at
 a time**, exactly as the script prints it, record the result, and publish at the end.
-**Expected duration: about 45–55 minutes.** That is ~95 sequential calls at ~15–20 s each, including the pauses, plus a few minutes to
-write up the 10 samples. Each HTTP 429 adds 1–2 minutes of waiting.
+**Expected duration: about 45–55 minutes.** That is ~90 sequential calls at ~15–20 s each, including the pauses, plus a few minutes to
+write up the 10 samples. Each HTTP 429 adds 1–2 minutes of waiting, each 5xx about 20 s.
 **The script generates every query, including every group and every split part. Never build, shorten, merge or edit a query
 yourself; copy what `next-call` prints. If something looks wrong, stop and report.**
 
@@ -18,6 +18,12 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   `scripts/gen_ambiguous.py`; e.g. A, ALL, NOW, ON, IT, ARE, CAN, FUN, GO, CAR, SO, OPEN, AI, NET). They are not swept and not ranked.
   A few big ambiguous core names (`config/context_tickers.txt`: META SPY MU HOOD COIN ARM AMC UBER SNOW RIOT) are counted every run
   with a required finance-context clause and get the label `context-required`.
+- **Not-measurable tickers are never counted or published.** A ticker in `config/ambiguous_tickers.txt` is not swept, not
+  counted individually (also not as a core daily count or a hot re-read of an earlier count), not stored in `data/hourly.json`,
+  and never appears in `latest.json`, `today.json` or the daily files; `check` fails if one does. After adding tickers to
+  `MANUAL_EXTRA` in `scripts/gen_ambiguous.py` and regenerating the list, run
+  `python3 scripts/build_rankings.py purge-not-measurable` (no X reads) and commit the result. (2026-10-17: SOFI, excluded in the
+  morning, was re-read as a hot ticker from its earlier stored count and listed in today.json with 4,433.)
 - **Word-collision guard (automatic, nothing to do in the loop):** the build holds back tickers whose bare count is > 8x their
   median `$cashtag` 5h count before 2026-10-17 (bare >= 50), or > 300 with no cashtag history (`held_back`, label
   `suspected-word-collision`), and queues them (`state.json` -> `collision_queue`) for own samples in the next run
@@ -52,15 +58,21 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
     - `record-error KEY --kind 429` prints `WAIT 90s`. Run Shell `sleep 90` (with `block_until_ms` ≥ 105000), then retry the SAME call.
     - If it gets a second 429, the script prints `WAIT 240s`. Run `sleep 240` (`block_until_ms` ≥ 255000), then make one last try. After a `GIVE UP` on 429s, `sleep 300` before the next call.
     - A third 429 means `GIVE UP`: the call is skipped. Never make a 4th attempt.
-  - **Any other error** (invalid request, 5xx, timeout, malformed result): `record-error KEY --kind other` says `RETRY` once.
+  - **HTTP 5xx (503 Service Unavailable, 500, 502, 504)** — separate from 429 since 2026-10-17 (the 16:21 run stopped after
+    five 503s): `record-error KEY --kind 5xx --detail "503 Service Unavailable"` prints `WAIT 20s`. Run `sleep 20`
+    (`block_until_ms` ≥ 35000), then retry the SAME call once. A second 5xx on that call means `GIVE UP` (skipped).
+    (`--kind other` with a 5xx detail is recognised and recorded as 5xx.)
+  - **Any other error** (invalid request, timeout, malformed result): `record-error KEY --kind other` says `RETRY` once.
     A second failure means `GIVE UP`.
   - **Never retry without `record-error` first.** The script also compares reads-left (B) with the recorded calls; a gap
     is counted as unrecorded retries (`unrecorded_retries`) against the retry reserve and printed as a WARNING
     (2026-10-12 11:14: two BA retries were not recorded). Reads spent by other bots in the same minutes show up the same way.
   - **Do what the script says:** `WAIT`, `RETRY`, `GIVE UP` or `STOP`. Never retry a call the script has skipped.
 - **Stop rules** (the script prints `STOP` and refuses further calls; `next-call` shows `STOPPED`):
-  - **5 non-429 errors** in the run, or
-  - the **retry reserve of 10 extra reads is used up** (429s and other errors together), or
+  - **8 5xx errors** in the run, or
+  - **5 other errors** (neither 429 nor 5xx) in the run, or
+  - the **retry reserve of 10 extra reads is used up** (429s, 5xx and other errors together), or
+  - 429s have no count limit of their own (only the reserve); their rules are unchanged.
   - reads left today ≤ 400.
   - After a STOP, the script tells you whether a **partial build** is allowed (all STOCK groups and all megacap counts — incl. the context tickers — done; a missing ETF group, split part or sample is only recorded as missing) or
     whether to **`abandon`**.
@@ -71,7 +83,7 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   - The script keeps the 10-read retry reserve free under the cap, and shrinks the run if needed: daily counts first (to 10),
     then splits (to 9), ETF groups, samples, spare, then the rest; megacaps last.
   - It prints `SKIP RUN` if fewer than ~20 planned reads fit.
-  - 5 runs × ≤105 = ≤525 reads per day.
+  - 5 runs × ≤100 = ≤500 reads per day.
 - **Fail closed on split state:** if `plan` (or `check`) says `split state inconsistent ... fail-closed`, do NOT edit
   `data/splits.json` by hand. Run `python3 scripts/build_rankings.py splits-reset` (no X reads; it only drops the refinement
   carried over from earlier runs), then `plan` again, and mention it in the report. If `next-call` itself reports an
@@ -120,12 +132,15 @@ If `data/universe_meta.json` `fetched_at` is more than 7 days old, run `python3 
 python3 scripts/build_rankings.py plan
 ```
 It prints the window (e.g. `2026-10-09T04:00:00Z -> 2026-10-09T09:00:00Z`; counts cover the 29h ending at `window_end`), the
-split, normally `stock_groups 13, megacaps 10, etf_groups 3, splits 24, samples 10, spare 4, dailies 31` = 95 planned, plus the
-10 retry reserve, and how many split nodes were carried over (plus any pruning notes).
+split, normally (bare mode) `probe 1, stock_groups 14, megacaps 18, etf_groups 3, splits 18, samples 10, spare 3, dailies 23`
+= 90 planned, plus the 10 retry reserve (max 100), and how many split nodes were carried over (plus any pruning notes).
+Since 2026-10-17 17:00 Berlin group queries are packed to **≤ 3,000 characters** (the 503s hit ~4,090-char queries), so there
+are more, shorter groups (14 stock + 16 ETF instead of 10 + 11); the first plan after the change re-packs every root, which
+drops the old split refinement once (`root ... re-packed` notes; expected).
 
-Order of the calls (all chosen by the script): [bare mode: PROBE] → stock groups (10 in bare mode, 13 in cashtag mode) + 3 ETF groups → megacaps (10, + 8 context tickers in bare mode) → adaptive splits (up to 24 reads;
-the script picks each next split from the counts just recorded, so you only ever see the next part) → stage-1 samples (6) →
-stage-2 samples (4) → daily exact counts (~31) → build.
+Order of the calls (all chosen by the script): [bare mode: PROBE] → stock groups (14 in bare mode) + 3 ETF groups → megacaps (10, + 8 context tickers in bare mode) → adaptive splits (up to 18 reads;
+the script picks each next split from the counts just recorded, so you only ever see the next part) → stage-1 samples (3) →
+stage-2 samples (1 co-mention + 6 own) → daily exact counts (~23) → build.
 
 ### 2. The call loop (repeat until `next-call` says `build`)
 ```bash
@@ -140,7 +155,7 @@ step to run. Script steps:
 
 For an X call:
 1. **Make that one call.**
-   - Copy the arguments verbatim. Group queries are ~4096 characters, and a typo silently drops tickers, so never retype them.
+   - Copy the arguments verbatim. Group queries are up to ~3000 characters, and a typo silently drops tickers, so never retype them.
      Split parts (keys like `S07.1`, `S07.2.3`) are groups too: `next-call` prints the full query. Never derive a part's
      ticker list yourself. If you need the text again, re-run `next-call` (it prints the same pending call).
    - Formats:
@@ -173,8 +188,9 @@ For an X call:
      ```bash
      python3 scripts/build_rankings.py record-error S05 --kind 429 --detail "429 Too Many Requests" --reads-left-today <B>
      ```
+     For a 503/5xx use `--kind 5xx --detail "503 Service Unavailable"`.
      Then do exactly what it prints: `WAIT 90s` → `sleep 90`, then the same call; `WAIT 240s` → `sleep 240`, then the same call one
-     last time; `RETRY` → the same call once more; `GIVE UP` → continue with `next-call`; `STOP` → step 3.
+     last time; `WAIT 20s` (5xx) → `sleep 20`, then the same call once; `RETRY` → the same call once more; `GIVE UP` → continue with `next-call`; `STOP` → step 3.
 3. **First call of the run:** record it right away with its B. If the script prints `SKIP RUN`, run
    `abandon --reason "budget skip"` and report a skip. Don't build or commit.
 4. Then run `next-call` again.
@@ -239,16 +255,17 @@ git push origin main
 
 ## Method summary (do not change silently)
 - Constants are at the top of `scripts/build_rankings.py`:
-  - `RUN_READS=95`, `RETRY_RESERVE=10`, `MAX_OTHER_ERRORS=5`, `PACE_SECONDS=6`, `WAIT_429=(90, 240)`, `COOLDOWN_AFTER_GIVE_UP=300`, `SAMPLE_MAX_QUERY_LEN=4095`, `OWN_SAMPLES=4`
-  - `MEGACAPS_N=10`, `ETF_GROUPS_PER_RUN=3`, `SPLIT_READS=24`, `SAMPLE_GROUPS=6`, `COMENTION_SAMPLES=4`, `SPARE=4`,
+  - `RUN_READS=90`, `RETRY_RESERVE=10`, `MAX_5XX_ERRORS=8`, `WAIT_5XX=20`, `MAX_OTHER_ERRORS=5`, `PACE_SECONDS=6`, `WAIT_429=(90, 240)`, `COOLDOWN_AFTER_GIVE_UP=300`, `MAX_GROUP_QUERY_LEN=3000`, `MAX_QUERY_LEN=4096`, `SAMPLE_MAX_QUERY_LEN=4095`, `OWN_SAMPLES=6`
+  - `MEGACAPS_N=10`, `ETF_GROUPS_PER_RUN=3`, `SPLIT_READS=18`, `SAMPLE_GROUPS=3`, `COMENTION_SAMPLES=1`, `SPARE=3`,
     `DAILY_COUNTS_MAX=35`, `CORE_DAILY_MIN=10`
   - splits: `LEAF_MAX=3`, `LEAF_MIN_24H=15`, `SPLIT_MIN_24H=40`, `DRILL_CONC=1.6`, `NODE_MAX_AGE_HOURS=30`, `MAX_NODES=400`,
     `OVERLAP_WARN=0.05`; re-reads: `HOT_REREAD_5H=60`, `HOT_REREAD_MAX=8`
   - `MIN_AUTHORS=3` (distinct authors of clean posts), `MIN_CLEAN_SHARE=0.3`, `DUMP_MIN_CASHTAGS=4`, `DUMP_MIN_WORDS=8`,
     `CLEAN_CHECK_MAX_AGE_HOURS=24`, `SPIKE_MIN_RATIO=2`, `RISER_MIN_1H_VS_PREV_DAY=2`, `BURST_FACTOR=6`, `BURST_DECAY=3`, `RISER_MIN_MENTIONS=20`, `RISER_MIN_RATIO=3`
   - `DAILY_CAP=600`, `MIN_RUN_READS=20`
-- Groups are packed by the script: every stock except the 10 megacaps (so the rest of the core is swept too), OR'ed, ≤4096
-  characters including the spam suffix (13 stock groups with `$`, 10 in bare mode without ambiguous tickers). 3 ETF groups rotate per run.
+- Groups are packed by the script: every stock except the 10 megacaps (so the rest of the core is swept too), OR'ed, ≤3000
+  characters including the spam suffix (since 2026-10-17 17:00 Berlin; before ≤4096: 13 stock groups with `$`, 10 in bare mode).
+  Now 14 stock groups in bare mode (without ambiguous tickers), 16 ETF groups. 3 ETF groups rotate per run.
 - Adaptive splits: a split cuts a node into 4 contiguous parts; if the node was counted in this run, 3 parts are counted and the
   4th = node − 3 parts (per hour, ≥ 0), else all 4 are counted. Drill chains follow a part holding ≥ 1.6× its fair share
   (counts of tickers measured individually in the last 30h are subtracted first); nodes with ≤ 3 tickers are leaves whose members

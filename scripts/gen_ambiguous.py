@@ -29,7 +29,10 @@ MANUAL_EXTRA = {"SMH", "LOL", "OMG", "WTF", "IMO", "FOMO", "YOLO", "HODL", "MOON
                 "SOFI",
                 # 2026-10-17 11:17 run (bare 5h vs median $cashtag 5h): SHOP 10,901 vs 21 (the word "shop"),
                 # BABA 6,669 vs 34, MARA 1,783 vs 27, NIO 353 vs 35, CRM 296 vs 20.5, PDD 140 vs 6.5
-                "SHOP", "BABA", "MARA", "NIO", "PDD", "CRM"}
+                "SHOP", "BABA", "MARA", "NIO", "PDD", "CRM",
+                # 2026-10-17 11:17 run, held by the word-collision guard (no $cashtag history): HAIN 8,028 bare,
+                # HAO 1,522, HAVA 1,063 (word/name collisions)
+                "HAIN", "HAO", "HAVA"}
 # frequent in the corpus only because of the company / ticker itself
 ALLOW = {"AMD", "MRNA", "IBM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG",
          "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "RIVN", "HIMS"}

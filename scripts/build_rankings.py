@@ -10,15 +10,15 @@ generates every query (groups, split parts, tickers, samples); never build one b
     -> make that single x tool call
     python3 scripts/build_rankings.py record KEY=TOTAL:b1,...,b29 --reads-left-today B     (counts; pauses 4s)
     python3 scripts/build_rankings.py record-sample KEY --lines FILE --reads-left-today B  (samples; pauses 4s)
-    python3 scripts/build_rankings.py record-error KEY --kind 429|other --reads-left-today B   (on errors;
-        prints WAIT 90s / WAIT 240s / RETRY / GIVE UP / STOP)
+    python3 scripts/build_rankings.py record-error KEY --kind 429|5xx|other --reads-left-today B   (on errors;
+        429: WAIT 90s / WAIT 240s; 5xx: WAIT 20s, one retry; other: RETRY once; GIVE UP / STOP)
     script steps when next-call says so: pick-samples (twice), pick-candidates
   python3 scripts/build_rankings.py build          # complete run, or partial if group sweep + megacaps are done
   python3 scripts/build_rankings.py abandon --reason "..."   # archive an unpublishable run
   python3 scripts/build_rankings.py next | check | calls STAGE [--all] | splits-reset
 
-Order: groups (13 stock + 3 ETF) -> 10 megacaps -> adaptive 4-way splits (<= 24 reads, chosen one at a time
-from the counts just recorded; the tree persists in data/splits.json, fail-closed validation) -> 6 + 4
+Order: groups (14 stock + 3 ETF, <= 3000 chars each) -> megacaps -> adaptive 4-way splits (<= 18 reads, chosen one at a time
+from the counts just recorded; the tree persists in data/splits.json, fail-closed validation) -> 3 + 1 + 6
 samples -> daily exact counts (split leaves, sample discoveries, hot re-reads, core due today) -> build
 (latest.json, history, today.json, daily/, hourly.json, splits.json, state.json).
 Every count read uses granularity=hour over the last 29 full UTC hours.
@@ -65,16 +65,18 @@ OWN_CLEAN_DEFAULT_PRIOR_BARE = 0.5   # bare mode: prior share of bare matches th
 WINDOW_HOURS = 5             # ranked window: last 5 full UTC hours
 HISTORY_HOURS = 29           # every count read covers 29 hourly buckets (window + same hours yesterday)
 MAX_QUERY_LEN = 4096         # X rejects longer queries (4099 chars -> invalid request, still costs a read)
-RUN_READS = 95               # target X reads per run (everything: groups, samples, counts, retries)
+MAX_GROUP_QUERY_LEN = 3000   # group sweep queries are packed to <= 3000 chars (2026-10-17: the 503s hit ~4,090-char
+                             # queries); more, shorter groups: 14 stock + 16 ETF groups instead of 10 + 11
+RUN_READS = 90               # planned X reads per run; + RETRY_RESERVE (10) -> at most ~100 per run
 DAILY_CAP = 600              # Alexander's cap per UTC day, shared by all bots
 DAILY_QUOTA = 1000           # the x tools report "B of 1000 today"; used today = 1000 - B
 FLOOR_LEFT = DAILY_QUOTA - DAILY_CAP   # never let "reads left today" drop below this (400)
 MIN_RUN_READS = 20           # skip the run if fewer reads fit
 ETF_GROUPS_PER_RUN = 3       # ETF groups rotate, 3 per run (14 groups -> each about once a day)
-SAMPLE_GROUPS = 4            # stage-1 samples: the hottest fresh groups / split nodes
-COMENTION_SAMPLES = 2        # stage-2 samples: top new tickers from stage 1, unverified split leaves, risers
+SAMPLE_GROUPS = 3            # stage-1 samples: the hottest fresh groups / split nodes
+COMENTION_SAMPLES = 1        # stage-2 samples: top new tickers from stage 1, unverified split leaves, risers
 MEGACAPS_N = 10              # config/megacaps.txt: counted individually every run
-SPLIT_READS = 24             # adaptive 4-way splits per run (3 reads with subtraction, 4 if the parent is stale)
+SPLIT_READS = 18             # adaptive 4-way splits per run (3 reads with subtraction, 4 if the parent is stale)
 DAILY_COUNTS_MAX = 35        # exact 29h counts per run for split leaves, sample candidates, hot re-reads, core
 CORE_DAILY_MIN = 10          # of those, at least this many go to core tickers not yet measured this UTC day
 LEAF_MAX = 3                 # split nodes with <= 3 tickers are leaves: their members get exact daily counts
@@ -93,9 +95,11 @@ CARRYOVER_MIN_MENTIONS = 25  # ... non-core tickers with >= this many mentions l
 CARRYOVER_MAX_AGE_HOURS = 12
 CORE_INDIVIDUAL = 50         # core tickers counted individually; the weakest rest go into the sweep
 CORE_FLOOR = 10              # budget shrink: core is cut first, down to this
-SPARE = 4                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
+SPARE = 3                    # unplanned slack inside RUN_READS (invalid requests, re-asks)
 RETRY_RESERVE = 10           # extra reads per run for retries (429 / errors), on top of RUN_READS -> max ~105
-MAX_OTHER_ERRORS = 5         # stop the run after this many non-429 errors
+MAX_OTHER_ERRORS = 5         # stop the run after this many errors that are neither 429 nor 5xx (invalid request, ...)
+MAX_5XX_ERRORS = 8           # stop the run after this many 5xx errors (503 Service Unavailable, ...); 429 rules separate
+WAIT_5XX = 20                # a call that got a 5xx is retried ONCE after this pause; a 2nd 5xx on it -> skipped
 PACE_SECONDS = 6             # record commands pause this long, so calls stay strictly sequential (<= ~10/min)
 WAIT_429 = (90, 240)         # wait before the 1st and the 2nd (last) retry of a call that got HTTP 429
 COOLDOWN_AFTER_GIVE_UP = 300 # after a call gave up on 429s, pause before the next call (shared limit recovers)
@@ -666,7 +670,22 @@ def load_hourly():
                            "dropped_tickers": len(h["tickers"]), "dropped_nodes": len(h["nodes"])}
         h["tickers"], h["nodes"] = {}, {}
         h["query_mode"] = query_mode()
+    drop_not_measurable(h)
     return h
+
+
+def drop_not_measurable(h):
+    """Remove not-measurable / excluded tickers from the hourly store (their series must never be re-read as
+    hot tickers or published in today.json / daily files). Returns the dropped tickers."""
+    ex = excluded_tickers()
+    gone = sorted(t for t in h["tickers"] if t in ex)
+    for t in gone:
+        h["tickers"].pop(t)
+    for day in h["seen"].values():
+        for t in [t for t in day if t in ex]:
+            day.pop(t)
+            gone.append(t)
+    return sorted(set(gone))
 
 
 def buckets_to_hours(run, buckets):
@@ -702,6 +721,7 @@ def daily_entries(hourly, day, through, universe, core, mega):
     for t, rec in hourly["tickers"].items():
         if any(k in rec["h"] for k in hours):
             names.add(t)
+    names -= excluded_tickers()
     out = []
     windows = [w for w in hourly["windows"] if day_of(w) == day]
     for t in sorted(names):
@@ -846,8 +866,9 @@ def write_daily(hourly, day, through, universe, core, mega, path, now):
 
 def update_hourly(run, hourly, agg, now):
     """Store every measured ticker/node series (hourly), the run window, and today's sample evidence."""
+    exclude = excluded_tickers()
     for key, c in run["counts"].items():
-        if key == "PROBE":
+        if key == "PROBE" or key in exclude:      # not-measurable tickers are never stored or published
             continue
         hrs = buckets_to_hours(run, c["buckets"])
         if key in run["tree"]["nodes"]:
@@ -1077,6 +1098,7 @@ def log_defaults(run):
     lg.setdefault("extra_reads", 0)
     lg.setdefault("retries_429", 0)
     lg.setdefault("errors_other", 0)
+    lg.setdefault("errors_5xx", 0)
     lg.setdefault("attempts", {})
     run.setdefault("skipped", [])
     run.setdefault("stopped", None)
@@ -1154,7 +1176,7 @@ def current_packing(universe):
     mega = set(megacap_list())
     stock = sorted(t for t, r in universe.items() if r["asset_type"] == "Stock" and t not in exclude and t not in mega)
     etf = sorted(t for t, r in universe.items() if r["asset_type"] == "ETF" and t not in exclude and t not in mega)
-    return pack(stock), pack(etf), stock, etf
+    return pack(stock, MAX_GROUP_QUERY_LEN), pack(etf, MAX_GROUP_QUERY_LEN), stock, etf
 
 
 def cmd_plan(args):
@@ -1250,7 +1272,7 @@ def cmd_plan(args):
         "samples": {},
         "picks": {"samples1": None, "samples2": None, "individual": None},
         "log": {"reads_left_today": args.reads_left_today, "reads_left_history": [], "extra_reads": 0,
-                "retries_429": 0, "errors_other": 0, "attempts": {}},
+                "retries_429": 0, "errors_other": 0, "errors_5xx": 0, "attempts": {}},
         "skipped": [],
         "stopped": None,
         "etf_requeued": ["E%02d" % (i + 1) for i in requeue],
@@ -1426,7 +1448,7 @@ def cmd_next_call(args):
         print("# split part %s of %s: %d tickers %s..%s (query generated by the script; copy verbatim)"
               % (k, node["parent"], len(node["tickers"]), node["tickers"][0], node["tickers"][-1]))
     print("# then: " + record_hint(stage, k))
-    print("# on an error/429: python3 scripts/build_rankings.py record-error %s --kind 429|other --reads-left-today <B>" % k)
+    print("# on an error: python3 scripts/build_rankings.py record-error %s --kind 429|5xx|other --reads-left-today <B>" % k)
     print("# %d %s calls pending incl. this one; remaining %d planned reads (+%d retry reserve)"
           % (len(calls), stage, reads_remaining(run), retry_left(run)))
     print("# " + PACING_NOTE)
@@ -1438,7 +1460,9 @@ def stop_checks(run):
     left = lg.get("reads_left_today")
     msg = None
     if lg.get("errors_other", 0) >= MAX_OTHER_ERRORS:
-        msg = "%d non-429 errors (limit %d)" % (lg["errors_other"], MAX_OTHER_ERRORS)
+        msg = "%d errors other than 429/5xx (limit %d)" % (lg["errors_other"], MAX_OTHER_ERRORS)
+    elif lg.get("errors_5xx", 0) >= MAX_5XX_ERRORS:
+        msg = "%d 5xx errors (limit %d)" % (lg["errors_5xx"], MAX_5XX_ERRORS)
     elif int(lg.get("extra_reads", 0)) >= RETRY_RESERVE and any_pending(run):
         msg = "retry reserve of %d reads used up" % RETRY_RESERVE
     elif left is not None and left <= FLOOR_LEFT:
@@ -2024,6 +2048,15 @@ def cmd_record_sample(args):
     pace(args)
 
 
+def error_kind(kind, detail):
+    """429 | 5xx | other. An 'other' error whose detail names an HTTP 5xx status (e.g. '503 Service Unavailable')
+    is a 5xx."""
+    if kind == "other" and re.search(r"(?<!\d)5\d\d(?!\d)|service unavailable|bad gateway|gateway time-?out|"
+                                     r"internal server error", detail or "", re.I):
+        return "5xx"
+    return kind
+
+
 def cmd_record_error(args):
     """One X read that gave no usable result. Decides retry / wait / give up and applies the stop rules."""
     run = load_run()
@@ -2032,18 +2065,25 @@ def cmd_record_error(args):
     pending = {k for st in STAGES for k, *_ in pending_calls(run, st)}
     if key not in pending:
         sys.exit("%s is not a pending call (already recorded or skipped?)" % key)
+    kind = error_kind(args.kind, args.detail)
+    if kind != args.kind:
+        print("(detail %r looks like a server error: recorded as --kind 5xx)" % (args.detail or ""))
+    log_defaults(run)
     att = lg["attempts"].setdefault(key, [])
-    att.append({"kind": args.kind, "at": iso(utcnow()), "detail": (args.detail or "")[:200]})
+    att.append({"kind": kind, "at": iso(utcnow()), "detail": (args.detail or "")[:200]})
     lg["extra_reads"] += 1
-    if args.kind == "429":
+    if kind == "429":
         lg["retries_429"] += 1
+    elif kind == "5xx":
+        lg["errors_5xx"] += 1
     else:
         lg["errors_other"] += 1
     reconcile_reads(run, args.reads_left_today)
     note_reads_left(run, args.reads_left_today)
     n429 = sum(1 for a in att if a["kind"] == "429")
-    noth = sum(1 for a in att if a["kind"] != "429")
-    give_up = n429 > len(WAIT_429) or noth >= 2
+    n5xx = sum(1 for a in att if a["kind"] == "5xx")
+    noth = sum(1 for a in att if a["kind"] not in ("429", "5xx"))
+    give_up = n429 > len(WAIT_429) or n5xx >= 2 or noth >= 2 or (n5xx and noth)
     if give_up:
         run["skipped"].append(key)
     switched = mode_from_tool_note(run, args)
@@ -2052,15 +2092,20 @@ def cmd_record_error(args):
     if switched:
         print(switched)
         return
-    print("%s: %s error recorded (attempts: %d x 429, %d other); run retries/errors %d of reserve %d, "
-          "non-429 errors %d of %d" % (key, args.kind, n429, noth, lg["extra_reads"], RETRY_RESERVE,
-                                       lg["errors_other"], MAX_OTHER_ERRORS))
+    print("%s: %s error recorded (attempts: %d x 429, %d x 5xx, %d other); run retries/errors %d of reserve %d, "
+          "5xx errors %d of %d, other errors %d of %d"
+          % (key, kind, n429, n5xx, noth, lg["extra_reads"], RETRY_RESERVE, lg["errors_5xx"], MAX_5XX_ERRORS,
+             lg["errors_other"], MAX_OTHER_ERRORS))
     if msg:
         print("STOP: %s. %s" % (msg, stop_advice(run)))
     elif give_up:
         print("GIVE UP on %s (no more retries); it is skipped and reported as missing. Continue with next-call "
-              "after a %ds pause." % (key, COOLDOWN_AFTER_GIVE_UP if args.kind == "429" else PACE_SECONDS))
-    elif args.kind == "429":
+              "after a %ds pause." % (key, COOLDOWN_AFTER_GIVE_UP if kind == "429" else
+                                       WAIT_5XX if kind == "5xx" else PACE_SECONDS))
+    elif kind == "5xx":
+        print("WAIT %ds, then retry the SAME call ONCE (a 2nd 5xx skips it). Shell: sleep %d  (set block_until_ms >= %d)"
+              % (WAIT_5XX, WAIT_5XX, (WAIT_5XX + 15) * 1000))
+    elif kind == "429":
         w = WAIT_429[n429 - 1]
         print("WAIT %ds, then retry the SAME call (%s). Shell: sleep %d  (set block_until_ms >= %d)"
               % (w, "1st retry" if n429 == 1 else "last try", w, (w + 15) * 1000))
@@ -2123,8 +2168,10 @@ def cmd_pick_candidates(args):
 
     leaf_via = dict(leaf)
 
+    exclude = excluded_tickers()
+
     def add(t, source, via):
-        if t in taken or len(picks) >= slots:
+        if t in taken or t in exclude or len(picks) >= slots:     # never count a not-measurable ticker
             return
         if t in leaf_via and source != "split-leaf":
             source, via = "split-leaf", leaf_via[t]
@@ -2187,9 +2234,9 @@ def cmd_next(args):
           % (run["window_start"], run["window_end"], reads_used(run), run["budget"], reads_remaining(run),
              left, FLOOR_LEFT))
     lg = run["log"]
-    print("retries/errors %d of reserve %d (429: %d, other: %d of max %d); skipped: %s"
-          % (lg["extra_reads"], RETRY_RESERVE, lg["retries_429"], lg["errors_other"], MAX_OTHER_ERRORS,
-             ", ".join(run["skipped"]) or "-"))
+    print("retries/errors %d of reserve %d (429: %d, 5xx: %d of max %d, other: %d of max %d); skipped: %s"
+          % (lg["extra_reads"], RETRY_RESERVE, lg["retries_429"], lg.get("errors_5xx", 0), MAX_5XX_ERRORS,
+             lg["errors_other"], MAX_OTHER_ERRORS, ", ".join(run["skipped"]) or "-"))
     print("splits: %d ops, %d of %d split reads planned" % (len(run["splits"]), split_reads_planned(run),
                                                             run["targets"]["splits"]))
     kind, payload = next_action(run)
@@ -2440,7 +2487,9 @@ def cmd_build(args):
         "measured_from": times[0],
         "measured_until": times[-1],
         "planned_not_measured": not_measured,
-        "counted_not_ranked": dropped_nm,
+        "counted_not_ranked": {"reads": len(dropped_nm),
+                               "note": "individual counts of tickers that are not measurable (config/"
+                                       "ambiguous_tickers.txt) are dropped and never published"},
         "x_reads_used": n_probe + n_groups + n_split + n_smp + n_ind + len(dropped_nm) + extra,
         "x_reads_breakdown": {"unrecorded_retries": int(run["log"].get("unrecorded_reads", 0)),
                               "mode_probe": n_probe, "group_counts": n_groups, "split_counts": n_split, "samples": n_smp,
@@ -2449,7 +2498,8 @@ def cmd_build(args):
                               "counted_not_ranked": len(dropped_nm),
                               "extra_errors_retries": extra,
                               "retries_429": int(run["log"].get("retries_429", 0)),
-                              "errors_other": int(run["log"].get("errors_other", 0))},
+                              "errors_other": int(run["log"].get("errors_other", 0)),
+                              "errors_5xx": int(run["log"].get("errors_5xx", 0))},
         "partial": not complete,
         "missing_calls": missing_calls(run),
         "partial_reason": partial_reason,
@@ -2689,8 +2739,8 @@ def cmd_check(args):
                 problems.append("%s group %s: query prefix does not match query mode %s" % (name, g[0], query_mode()))
             if back != g:
                 problems.append("%s group %s: query does not parse back to its members" % (name, g[0]))
-            if len(q) > MAX_QUERY_LEN:
-                problems.append("%s group %s too long: %d" % (name, g[0], len(q)))
+            if len(q) > MAX_GROUP_QUERY_LEN:
+                problems.append("%s group %s too long: %d (max %d)" % (name, g[0], len(q), MAX_GROUP_QUERY_LEN))
         print("%s: %d tickers in %d groups (sizes %s..%s, longest query %d chars)"
               % (name, len(tick), len(groups), min(map(len, groups)), max(map(len, groups)),
                  max(len(group_query(g)) for g in groups)))
@@ -2737,12 +2787,108 @@ def cmd_check(args):
     else:
         print("query mode CASHTAG ($TICKER queries)")
     t, ok = size_run(RUN_READS, len(stock_groups), len(etf_groups), len(mega), 1 if bare() else 0)
-    print("default split of %d reads: %s (sum %d)" % (RUN_READS, json.dumps(t), sum(t.values())))
+    print("default split of %d reads: %s (sum %d; + retry reserve %d = %d max per run)"
+          % (RUN_READS, json.dumps(t), sum(t.values()), RETRY_RESERVE, sum(t.values()) + RETRY_RESERVE))
+    if not ok or sum(t.values()) + RETRY_RESERVE > 100:
+        problems.append("read plan exceeds 100 reads per run incl. the retry reserve")
+    for f, where in published_nm_leaks():
+        problems.append("not-measurable ticker published in %s: %s (run: purge-not-measurable)" % (f, where))
     for p in problems:
         print("PROBLEM:", p)
     if problems:
         sys.exit(1)
     print("check OK")
+
+
+def _published_files():
+    """Published files where a not-measurable ticker must never appear: latest.json, today.json, hourly.json,
+    next_tickers.json and the daily files written in bare mode (cashtag-era daily files hold $TICKER counts,
+    which were measurable)."""
+    out = [LATEST_JSON, TODAY_JSON, os.path.join(DATA, "next_tickers.json")]
+    for f in sorted(glob.glob(os.path.join(DAILY_DIR, "*.json"))):
+        mn = (load_json(f, {}) or {}).get("method_note")
+        if isinstance(mn, dict) and mn.get("query_mode") == "bare":
+            out.append(f)
+    return [f for f in out if os.path.exists(f)]
+
+
+def _scrub(o, ex, hits, path=""):
+    """Remove not-measurable tickers from a published JSON object (dict entries with "ticker", ticker strings in
+    lists, ticker keys); the not_measurable block (which lists examples of them) is kept. Returns the object."""
+    if isinstance(o, dict):
+        for k in list(o):
+            if k == "not_measurable":
+                continue
+            if k in ex and CASHTAG_RE.match(k):
+                hits.append("%s/%s" % (path, k))
+                o.pop(k)
+                continue
+            o[k] = _scrub(o[k], ex, hits, "%s/%s" % (path, k))
+        return o
+    if isinstance(o, list):
+        keep = []
+        for i, v in enumerate(o):
+            t = v.get("ticker") if isinstance(v, dict) else v if isinstance(v, str) else None
+            if isinstance(t, str) and t in ex:
+                hits.append("%s[%d]=%s" % (path, i, t))
+                continue
+            keep.append(_scrub(v, ex, hits, "%s[%d]" % (path, i)))
+        return keep
+    return o
+
+
+def published_nm_leaks():
+    ex = excluded_tickers()
+    leaks = []
+    for f in _published_files():
+        hits = []
+        _scrub(load_json(f, {}), ex, hits)
+        leaks += [(os.path.relpath(f, ROOT), h) for h in hits[:5]]
+    h = load_json(HOURLY_JSON, {}) or {}
+    bad = sorted(t for t in (h.get("tickers") or {}) if t in ex)
+    if bad:
+        leaks.append(("data/hourly.json", "tickers " + ",".join(bad[:10])))
+    return leaks
+
+
+def _recount_daily(d):
+    stat = {}
+    for e in d.get("tickers", []):
+        stat[e["status"]] = stat.get(e["status"], 0) + 1
+    d["status_counts"] = stat
+    d["tickers_seen"] = len(d.get("tickers", []))
+    d["talked_about_today"] = sum(1 for e in d.get("tickers", []) if not e.get("held_back") and
+                                  ((e.get("count") or 0) > 0 or (e.get("exact_part") or 0) > 0))
+
+
+def cmd_purge_not_measurable(args):
+    """No X reads: remove not-measurable tickers from hourly.json and every published file (see _published_files)."""
+    ex = excluded_tickers()
+    h = load_json(HOURLY_JSON, None)
+    if h is not None:
+        h.setdefault("tickers", {})
+        h.setdefault("seen", {})
+        gone = drop_not_measurable(h)
+        if gone:
+            write_json(HOURLY_JSON, h, compact=True)
+            print("data/hourly.json: dropped %s" % ",".join(gone))
+    for f in _published_files():
+        d = load_json(f, {})
+        hits = []
+        d = _scrub(d, ex, hits)
+        if not hits:
+            continue
+        if isinstance(d.get("tickers"), list) and "status_counts" in d:
+            _recount_daily(d)
+        if isinstance(d.get("rankings"), list):
+            for i, r in enumerate(d["rankings"]):
+                if "rank" in r:
+                    r["rank"] = i + 1
+            if "ranked_count" in d:
+                d["ranked_count"] = len(d["rankings"])
+        write_json(f, d)
+        print("%s: removed %d (%s)" % (os.path.relpath(f, ROOT), len(hits),
+                                       ", ".join(sorted({x.rsplit("=", 1)[-1].rsplit("/", 1)[-1] for x in hits}))))
 
 
 def cmd_set_mode(args):
@@ -2782,7 +2928,7 @@ def main():
     p.add_argument("--no-sleep", action="store_true", help="skip the pacing pause (tests only)")
     p = sub.add_parser("record-error", help="record a read that failed (HTTP 429 or other) and get retry advice")
     p.add_argument("key")
-    p.add_argument("--kind", choices=["429", "other"], required=True)
+    p.add_argument("--kind", choices=["429", "5xx", "other"], required=True)
     p.add_argument("--detail", help="short error text")
     p.add_argument("--dollar-removed", choices=["yes", "no"], help="the error output said '%s'" % DOLLAR_NOTE)
     p.add_argument("--reads-left-today", type=int)
@@ -2799,6 +2945,8 @@ def main():
     sub.add_parser("check", help="offline self-checks")
     sub.add_parser("migrate", help="migrate state.json/next_tickers.json from the old method")
     sub.add_parser("splits-reset", help="reset data/splits.json to an empty tree (after a fail-closed error)")
+    sub.add_parser("purge-not-measurable", help="no X reads: drop not-measurable tickers from hourly.json and the "
+                                                "published files (after the ambiguous list grew)")
     p = sub.add_parser("set-mode", help="set the query mode by hand (cashtag | bare); normally automatic")
     p.add_argument("mode", choices=["cashtag", "bare"])
     p.add_argument("--reason", required=True)
@@ -2808,7 +2956,8 @@ def main():
      "pick-candidates": cmd_pick_candidates, "next": cmd_next, "status": cmd_next,
      "record-error": cmd_record_error, "next-call": cmd_next_call, "abandon": cmd_abandon,
      "build": cmd_build, "check": cmd_check, "migrate": cmd_migrate,
-     "splits-reset": cmd_splits_reset, "set-mode": cmd_set_mode}[args.cmd](args)
+     "splits-reset": cmd_splits_reset, "set-mode": cmd_set_mode,
+     "purge-not-measurable": cmd_purge_not_measurable}[args.cmd](args)
 
 
 if __name__ == "__main__":

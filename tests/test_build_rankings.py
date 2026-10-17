@@ -77,17 +77,22 @@ class Packing(unittest.TestCase):
 
 class Budget(unittest.TestCase):
     def test_default_split(self):
-        t, ok = br.size_run(95, 13, 14)
+        t, ok = br.size_run(90, 13, 14)
         self.assertTrue(ok)
-        self.assertEqual(t, {"probe": 0, "stock_groups": 13, "megacaps": 10, "etf_groups": 3, "splits": 24,
-                             "samples": 12, "spare": 4, "dailies": 29})
-        t, ok = br.size_run(95, 10, 11, 18, 1)          # bare mode: probe + 10 megacaps + 8 context tickers
-        self.assertEqual((t["probe"], t["megacaps"], t["dailies"], sum(t.values())), (1, 18, 23, 95))
+        self.assertEqual(t, {"probe": 0, "stock_groups": 13, "megacaps": 10, "etf_groups": 3, "splits": 18,
+                             "samples": 10, "spare": 3, "dailies": 33})
+        # bare mode since 2026-10-17 17:00: groups <= 3000 chars (14 stock), probe + 10 megacaps + 8 context
+        t, ok = br.size_run(br.RUN_READS, 14, 16, 18, 1)
+        self.assertEqual(t, {"probe": 1, "stock_groups": 14, "megacaps": 18, "etf_groups": 3, "splits": 18,
+                             "samples": 10, "spare": 3, "dailies": 23})
+        self.assertLessEqual(sum(t.values()) + br.RETRY_RESERVE, 100)
 
     def test_dailies_then_splits_shrink_first(self):
         t, ok = br.size_run(70, 13, 14)
-        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (10, 18, 10, 12))
+        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (13, 18, 10, 10))
         self.assertEqual(sum(t.values()), 70)
+        t, ok = br.size_run(60, 13, 14)
+        self.assertEqual((t["dailies"], t["splits"], t["megacaps"], t["samples"]), (10, 11, 10, 10))
         t, ok = br.size_run(40, 13, 14)
         self.assertEqual(sum(t.values()), 40)
         self.assertEqual(t["megacaps"], 10)
@@ -316,6 +321,12 @@ class Migration(unittest.TestCase):
                                         "measured_at": "2026-10-08T09:18:54Z"}}}, open(p, "w"))
         s = br.load_state()
         self.assertEqual((s["etf_rotation_next"], s["risers"], s["last_run_noncore"]), (0, [], []))
+        lp = os.path.join(TMP, "data", "latest.json")
+        keep = open(lp).read()
+        self.addCleanup(lambda: open(lp, "w").write(keep))
+        json.dump({"window_end": "2026-10-08T09:00:00Z",          # a v1 latest.json with a non-core ticker
+                   "rankings": [{"ticker": "AAPL", "mentions": 1, "tier": "core"},
+                                {"ticker": "RGTI", "mentions": 40, "tier": "hot"}]}, open(lp, "w"))
         r = run("migrate")
         self.assertEqual(r.returncode, 0, r.stderr)
         s = json.load(open(p))
@@ -401,7 +412,7 @@ class RunFlow(unittest.TestCase):
         for k in ("S02", "S03"):
             run("record-error", k, "--kind", "other")
         r = run("record-error", "S04", "--kind", "other")
-        self.assertIn("STOP: 5 non-429 errors", r.stdout)
+        self.assertIn("STOP: 5 errors other than 429/5xx", r.stdout)
         self.assertIn("cannot build", r.stdout)
         self.assertIn("STOPPED", run("next-call").stdout)
 
@@ -931,11 +942,117 @@ class CollisionGuard(unittest.TestCase):
         run_obj = {"window_end": "2026-10-17T09:00:00Z", "megacaps": ["NVDA", "TSLA", "QQQ"]}
         hourly = {"tickers": {}}
         st = {"tickers": {}, "own_clean_mode": "bare", "own_clean": {},
-              "collision_queue": [{"ticker": t} for t in ("HAIN", "HAO", "HAVA", "SHOP")]}
+              "collision_queue": [{"ticker": t} for t in ("HASI", "HAPN", "HAYW", "SHOP")]}
         own = br.own_sample_targets(run_obj, hourly, st, 6)
-        self.assertEqual(own[:3], ["HAIN", "HAO", "HAVA"])          # SHOP: not measurable, never sampled
+        self.assertEqual(own[:3], ["HASI", "HAPN", "HAYW"])          # SHOP: not measurable, never sampled
         self.assertEqual(len(own), 6)
         self.assertNotIn("SHOP", own)
+
+
+class Oct17Fixes(unittest.TestCase):
+    """2026-10-17 16:21 run: SOFI leak (not-measurable ticker still counted/published), 503 handling, shorter groups."""
+
+    def setUp(self):
+        reset_data()
+
+    def tearDown(self):
+        set_mode("cashtag")
+        shutil.copy(os.path.join(REPO, "data", "latest.json"), os.path.join(TMP, "data", "latest.json"))
+
+    def plan(self):
+        r = run("plan", "--now", "2026-10-09T09:14:00Z", "--reads-left-today", "900")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_503_waits_20s_retries_once(self):
+        self.plan()
+        r = run("record-error", "S01", "--kind", "other", "--detail", "503 Service Unavailable")
+        self.assertIn("recorded as --kind 5xx", r.stdout)
+        self.assertIn("WAIT 20s", r.stdout)
+        r = run("record-error", "S01", "--kind", "5xx")
+        self.assertIn("GIVE UP", r.stdout)
+        lg = runjson()["log"]
+        self.assertEqual((lg["errors_5xx"], lg["errors_other"], lg["retries_429"]), (2, 0, 0))
+        self.assertIn("S01", runjson()["skipped"])
+
+    def test_five_503s_no_longer_stop_eight_do(self):
+        self.plan()
+        keys = [g["key"] for g in runjson()["groups"]]
+        for k in keys[:7]:
+            out = run("record-error", k, "--kind", "5xx").stdout
+            self.assertNotIn("STOP", out, k)               # the 16:21 run stopped at the 5th 503
+        out = run("record-error", keys[7], "--kind", "5xx").stdout
+        self.assertIn("STOP: 8 5xx errors (limit 8)", out)
+
+    def test_429_rules_unchanged(self):
+        self.plan()
+        self.assertIn("WAIT 90s", run("record-error", "S01", "--kind", "429").stdout)
+        self.assertIn("WAIT 240s", run("record-error", "S01", "--kind", "429").stdout)
+        self.assertIn("GIVE UP", run("record-error", "S01", "--kind", "429").stdout)
+        self.assertEqual(runjson()["log"]["errors_5xx"], 0)
+
+    def test_group_queries_at_most_3000_chars(self):
+        for mode in ("cashtag", "bare"):
+            set_mode(mode)
+            stock, etf, st, et = br.current_packing(br.load_universe())
+            for g in stock + etf:
+                self.assertLessEqual(len(br.group_query(g)), br.MAX_GROUP_QUERY_LEN)
+            self.assertEqual([t for g in stock for t in g], st)
+        set_mode("bare")
+        stock, etf, _, _ = br.current_packing(br.load_universe())
+        self.assertGreaterEqual(len(stock), 14)
+
+    def test_not_measurable_never_stored_or_published(self):
+        set_mode("bare")
+        self.assertIn("SOFI", br.not_measurable())
+        for t in ("HAIN", "HAO", "HAVA"):
+            self.assertIn(t, br.not_measurable(), t)
+        hp = os.path.join(TMP, "data", "hourly.json")
+        hours = {"2026-10-17T%02d" % h: 300 for h in range(0, 9)}
+        rec = lambda: {"h": dict(hours), "sources": ["core-daily"], "last_5h": 1500,
+                       "last_window_end": "2026-10-17T09:00:00Z", "last_measured": "2026-10-17T09:40:00Z"}
+        json.dump({"version": 1, "query_mode": "bare", "tickers": {"SOFI": rec(), "NVDA": rec()}, "nodes": {},
+                   "seen": {"2026-10-17": {"SOFI": {"authors": ["a"], "clean": 1, "total": 1}}},
+                   "windows": ["2026-10-17T09:00:00Z"]}, open(hp, "w"))
+        h = br.load_hourly()                          # hot re-reads and daily files read this store
+        self.assertNotIn("SOFI", h["tickers"])
+        self.assertNotIn("SOFI", h["seen"]["2026-10-17"])
+        ent, _ = br.daily_entries(h, "2026-10-17", br.parse_iso("2026-10-17T09:00:00Z"), {}, set(), {"NVDA"})
+        self.assertEqual([e["ticker"] for e in ent], ["NVDA"])
+        # a count recorded for a not-measurable ticker is never stored
+        run_obj = {"counts": {"SOFI": {"buckets": [10] * 29, "recorded_at": "2026-10-17T14:30:00Z"}},
+                   "tree": {"nodes": {}}, "history_start": "2026-10-16T09:00:00Z",
+                   "window_end": "2026-10-17T14:00:00Z", "count_sources": {}}
+        br.update_hourly(run_obj, h, {}, br.utcnow())
+        self.assertNotIn("SOFI", h["tickers"])
+        # published files: check flags a leak, purge-not-measurable removes it
+        json.dump({"version": 1, "query_mode": "bare", "tickers": {"SOFI": rec()}, "nodes": {}, "seen": {},
+                   "windows": []}, open(hp, "w"))
+        tp = os.path.join(TMP, "data", "today.json")
+        json.dump({"method_note": {"query_mode": "bare"}, "status_counts": {"partial": 2},
+                   "tickers": [{"ticker": "SOFI", "status": "partial", "exact_part": 4433, "held_back": True},
+                               {"ticker": "NVDA", "status": "partial", "exact_part": 900, "held_back": False}]},
+                  open(tp, "w"))
+        lp = os.path.join(TMP, "data", "latest.json")
+        lt = json.load(open(lp))
+        lt["held_back"] = (lt.get("held_back") or []) + [{"ticker": "HAIN", "mentions": 8028}]
+        lt["collision_queue"] = ["HAIN", "HAO"]
+        json.dump(lt, open(lp, "w"))
+        r = run("check")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not-measurable ticker published in data/today.json", r.stdout)
+        r = run("purge-not-measurable")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        td = json.load(open(tp))
+        self.assertEqual([e["ticker"] for e in td["tickers"]], ["NVDA"])
+        self.assertEqual((td["tickers_seen"], td["talked_about_today"], td["status_counts"]), (1, 1, {"partial": 1}))
+        lt = json.load(open(lp))
+        self.assertNotIn("HAIN", json.dumps(lt["held_back"]))
+        self.assertEqual(lt["collision_queue"], [])
+        self.assertIn("A", lt["not_measurable"]["examples"])          # the documented examples stay
+        self.assertNotIn("SOFI", json.load(open(hp))["tickers"])
+        r = run("check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        os.remove(tp)
 
 
 if __name__ == "__main__":
