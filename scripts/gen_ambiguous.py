@@ -24,10 +24,12 @@ OTHER = ("de", "fr", "es", "it", "pt", "nl")
 # slang / acronyms / names that are clearly not about the stock in a bare search
 MANUAL_EXTRA = {"SMH", "LOL", "OMG", "WTF", "IMO", "FOMO", "YOLO", "HODL", "MOON", "PUMP", "BULL", "BEAR", "CEO",
                 "USA", "NYC", "ATH", "EPS", "IPO", "ETF", "GDP", "CPI", "FED", "SEC", "FBI", "CIA", "NBA", "NFL",
-                "UFC", "WWE", "TV", "PC", "UK", "EU", "LIT", "LITE", "AERO", "PILL", "DOG", "CAT", "FUN", "CAR"}
+                "UFC", "WWE", "TV", "PC", "UK", "EU", "LIT", "LITE", "AERO", "PILL", "DOG", "CAT", "FUN", "CAR",
+                # 2026-10-17 first bare run: SOFI 3,080 bare vs 141 $SOFI the run before (name Sofi/Sofia, SoFi Stadium)
+                "SOFI"}
 # frequent in the corpus only because of the company / ticker itself
 ALLOW = {"AMD", "CRM", "MARA", "BABA", "MRNA", "IBM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG",
-         "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "SOFI", "RIVN", "HIMS", "NIO", "PDD"}
+         "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "RIVN", "HIMS", "NIO", "PDD"}
 
 
 def classify(t):

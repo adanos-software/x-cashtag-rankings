@@ -2124,7 +2124,11 @@ def cmd_build(args):
     picks = [{"ticker": t, "tier": "core", "source": "megacap", "collision": t in coll,
               "query": ticker_query(t, coll), "via": None} for t in run["megacaps"]]
     picks += run["picks"]["individual"] or []
-    measured = [p for p in picks if p["ticker"] in run["counts"]]
+    # a ticker that became not measurable (config/ambiguous_tickers.txt) after it was counted is never ranked
+    dropped_nm = sorted({p["ticker"] for p in picks if p["ticker"] in run["counts"]} & excluded_tickers())
+    measured = [p for p in picks if p["ticker"] in run["counts"] and p["ticker"] not in dropped_nm]
+    if dropped_nm:
+        print("not ranked (not measurable / excluded): %s" % ", ".join(dropped_nm))
     if not measured:
         sys.exit("no individual counts recorded")
     universe = load_universe()
@@ -2313,11 +2317,13 @@ def cmd_build(args):
         "measured_from": times[0],
         "measured_until": times[-1],
         "planned_not_measured": not_measured,
-        "x_reads_used": n_probe + n_groups + n_split + n_smp + n_ind + extra,
+        "counted_not_ranked": dropped_nm,
+        "x_reads_used": n_probe + n_groups + n_split + n_smp + n_ind + len(dropped_nm) + extra,
         "x_reads_breakdown": {"unrecorded_retries": int(run["log"].get("unrecorded_reads", 0)),
                               "mode_probe": n_probe, "group_counts": n_groups, "split_counts": n_split, "samples": n_smp,
                               "individual_counts": n_ind, "megacap_counts": n_mega,
                               "daily_counts": n_ind - n_mega,
+                              "counted_not_ranked": len(dropped_nm),
                               "extra_errors_retries": extra,
                               "retries_429": int(run["log"].get("retries_429", 0)),
                               "errors_other": int(run["log"].get("errors_other", 0))},
