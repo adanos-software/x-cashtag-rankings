@@ -1,9 +1,16 @@
 {
-  "generated_at": "2026-10-16T23:52:48Z",
+  "generated_at": "2026-10-17T05:47:56Z",
   "method": "group-sweep+adaptive-splits+sampling+daily-counts",
   "note": "Expected individual counts of the next run: the megacaps (every run). Everything else, including the rest of the core, is screened in the group sweep and gets one exact daily count per UTC day (split leaves, sample discoveries, hot re-reads, core due today), chosen by `pick-candidates` at run time.",
-  "query_pattern": "$TICKER -is:retweet",
-  "count": 10,
+  "query_pattern": "TICKER -is:retweet <spam suffix>",
+  "method_note": {
+    "method_version": 4,
+    "query_mode": "bare",
+    "counting_changed": "On 2026-10-17 counting changed from the $TICKER cashtag to the BARE ticker (TICKER without $), because the free x tools now strip '$' from queries ('$ was removed from query'). Bare counts include plain-text mentions (and company-name mentions where the ticker is the name), so they are NOT directly comparable with counts before 2026-10-17. Ranking uses mentions_clean_est = bare count x the share of sampled posts that are real stock mentions ($cashtag or ticker + stock context).",
+    "mode_since": "2026-10-17T04:23:20Z",
+    "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
+  },
+  "count": 18,
   "tickers": [
     {
       "ticker": "SPY",
@@ -54,59 +61,84 @@
       "ticker": "PLTR",
       "tier": "core",
       "source": "megacap"
+    },
+    {
+      "ticker": "MU",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "HOOD",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "COIN",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "ARM",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "AMC",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "UBER",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "SNOW",
+      "tier": "core",
+      "source": "megacap"
+    },
+    {
+      "ticker": "RIOT",
+      "tier": "core",
+      "source": "megacap"
     }
   ],
   "core_in_group_sweep": [
-    "NBIS",
-    "CRWV",
-    "MU",
-    "GME",
     "AMD",
+    "CRWV",
     "MSTR",
+    "NBIS",
+    "GME",
     "AVGO",
-    "ASTS",
-    "INTC",
-    "RKLB",
     "SNDK",
-    "IWM",
-    "NFLX",
-    "TSM",
-    "HOOD",
-    "SOFI",
-    "AMC",
-    "ORCL",
-    "IONQ",
-    "OPEN",
-    "ARM",
-    "DIA",
-    "GOOG",
-    "UBER",
-    "XOM",
-    "NET",
-    "RDDT",
-    "OKLO",
-    "WMT",
-    "AI",
-    "HIMS",
     "ASML",
-    "BMNR",
-    "COIN",
-    "RIOT",
-    "BA",
-    "PYPL",
+    "IONQ",
+    "TSM",
+    "INTC",
+    "ASTS",
+    "RKLB",
+    "GOOG",
+    "XOM",
+    "HIMS",
+    "ORCL",
+    "NFLX",
+    "IWM",
+    "WMT",
     "SMCI",
-    "APP",
+    "BMNR",
+    "OKLO",
     "CRM",
     "SHOP",
     "BABA",
     "RIVN",
+    "RDDT",
     "CVNA",
     "MARA",
+    "PYPL",
     "NIO",
     "CRWD",
     "JPM",
-    "PDD",
-    "SNOW"
+    "PDD"
   ],
-  "etf_rotation_next": 1
+  "etf_rotation_next": 4
 }
