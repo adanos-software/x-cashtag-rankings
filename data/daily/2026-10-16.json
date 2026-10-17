@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "partial": 16,
-    "exact": 46,
+    "exact": 45,
+    "partial": 7,
     "bounded": 19,
-    "seen": 194
+    "seen": 131
   },
-  "tickers_seen": 275,
+  "tickers_seen": 202,
   "talked_about_today": 49,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,85 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "SHOP",
-      "cashtag": "$SHOP",
-      "tier": "other",
-      "asset_type": null,
-      "status": "partial",
-      "count": null,
-      "exact_part": 53653,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-17T09:44:35Z",
-      "last_measured": "2026-10-17T09:44:35Z",
-      "sources": [
-        "core-daily"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 12050,
-        "2026-10-16T14:00:00Z": 13981,
-        "2026-10-16T19:00:00Z": 15556,
-        "2026-10-16T23:00:00Z": 12797
-      }
-    },
-    {
-      "ticker": "BABA",
-      "cashtag": "$BABA",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 34177,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": "2026-10-17T09:44:49Z",
-      "sources": [
-        "core-daily",
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 33% clean, 1 clean authors",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 7615,
-        "2026-10-16T14:00:00Z": 9306,
-        "2026-10-16T19:00:00Z": 10227,
-        "2026-10-16T23:00:00Z": 8315
-      }
-    },
-    {
-      "ticker": "HAIN",
-      "cashtag": "$HAIN",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 30287,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": 34136,
-      "first_seen": "2026-10-17T09:40:53Z",
-      "last_measured": "2026-10-17T09:40:53Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 8879,
-        "2026-10-16T14:00:00Z": 9523,
-        "2026-10-16T19:00:00Z": 9018,
-        "2026-10-16T23:00:00Z": 4111
-      }
-    },
     {
       "ticker": "TSLA",
       "cashtag": "$TSLA",
@@ -130,65 +51,6 @@
         "2026-10-16T14:00:00Z": 4065,
         "2026-10-16T19:00:00Z": 4163,
         "2026-10-16T23:00:00Z": 2400
-      }
-    },
-    {
-      "ticker": "SOFI",
-      "cashtag": "$SOFI",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 12950,
-      "exact_part": 12950,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 12950,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": "2026-10-17T09:41:08Z",
-      "sources": [
-        "core-daily",
-        "hot-reread",
-        "sample"
-      ],
-      "sample_posts": 20,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.1,
-      "held_back": true,
-      "held_back_reason": "sample today: 20 posts, 10% clean, 2 clean authors",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 1993,
-        "2026-10-16T14:00:00Z": 2496,
-        "2026-10-16T19:00:00Z": 2748,
-        "2026-10-16T23:00:00Z": 2879
-      }
-    },
-    {
-      "ticker": "MARA",
-      "cashtag": "$MARA",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 12905,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": "2026-10-17T09:45:33Z",
-      "sources": [
-        "core-daily",
-        "sample"
-      ],
-      "sample_posts": 8,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.12,
-      "held_back": true,
-      "held_back_reason": "sample today: 8 posts, 12% clean, 1 clean authors",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 2015,
-        "2026-10-16T14:00:00Z": 3241,
-        "2026-10-16T19:00:00Z": 4341,
-        "2026-10-16T23:00:00Z": 3693
       }
     },
     {
@@ -248,31 +110,6 @@
       }
     },
     {
-      "ticker": "HAVA",
-      "cashtag": "$HAVA",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 6371,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": 10220,
-      "first_seen": "2026-10-17T09:41:51Z",
-      "last_measured": "2026-10-17T09:41:51Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 1362,
-        "2026-10-16T14:00:00Z": 1861,
-        "2026-10-16T19:00:00Z": 1958,
-        "2026-10-16T23:00:00Z": 1424
-      }
-    },
-    {
       "ticker": "NVDA",
       "cashtag": "$NVDA",
       "tier": "megacap",
@@ -298,31 +135,6 @@
         "2026-10-16T14:00:00Z": 1306,
         "2026-10-16T19:00:00Z": 1921,
         "2026-10-16T23:00:00Z": 1661
-      }
-    },
-    {
-      "ticker": "HAO",
-      "cashtag": "$HAO",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 5655,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": 9504,
-      "first_seen": "2026-10-17T09:41:23Z",
-      "last_measured": "2026-10-17T09:41:23Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 1519,
-        "2026-10-16T14:00:00Z": 1887,
-        "2026-10-16T19:00:00Z": 1562,
-        "2026-10-16T23:00:00Z": 760
       }
     },
     {
@@ -496,35 +308,6 @@
       }
     },
     {
-      "ticker": "CRM",
-      "cashtag": "$CRM",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 2001,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": "2026-10-17T09:44:21Z",
-      "sources": [
-        "core-daily",
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 0,
-      "sample_clean_share": 0.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 0% clean, 0 clean authors",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 423,
-        "2026-10-16T14:00:00Z": 566,
-        "2026-10-16T19:00:00Z": 662,
-        "2026-10-16T23:00:00Z": 389
-      }
-    },
-    {
       "ticker": "ASML",
       "cashtag": "$ASML",
       "tier": "core",
@@ -634,31 +417,6 @@
         "2026-10-16T14:00:00Z": 364,
         "2026-10-16T19:00:00Z": 466,
         "2026-10-16T23:00:00Z": 385
-      }
-    },
-    {
-      "ticker": "NIO",
-      "cashtag": "$NIO",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 1702,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-17T09:45:47Z",
-      "last_measured": "2026-10-17T09:45:47Z",
-      "sources": [
-        "core-daily"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 309,
-        "2026-10-16T14:00:00Z": 496,
-        "2026-10-16T19:00:00Z": 570,
-        "2026-10-16T23:00:00Z": 331
       }
     },
     {
@@ -1269,31 +1027,6 @@
         "2026-10-16T14:00:00Z": 177,
         "2026-10-16T19:00:00Z": 153,
         "2026-10-16T23:00:00Z": 85
-      }
-    },
-    {
-      "ticker": "PDD",
-      "cashtag": "$PDD",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 544,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-17T09:46:32Z",
-      "last_measured": "2026-10-17T09:46:32Z",
-      "sources": [
-        "core-daily"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-16T09:00:00Z": 188,
-        "2026-10-16T14:00:00Z": 176,
-        "2026-10-16T19:00:00Z": 120,
-        "2026-10-16T23:00:00Z": 64
       }
     },
     {
@@ -2283,27 +2016,6 @@
       "held_back": false
     },
     {
-      "ticker": "AERO",
-      "cashtag": "$AERO",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 47,
-      "sample_clean_authors": 12,
-      "sample_clean_share": 0.81,
-      "held_back": false
-    },
-    {
       "ticker": "AGIX",
       "cashtag": "$AGIX",
       "tier": "other",
@@ -2324,27 +2036,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "AI",
-      "cashtag": "$AI",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 22,
-      "sample_clean_authors": 10,
-      "sample_clean_share": 0.64,
-      "held_back": false
     },
     {
       "ticker": "AIG",
@@ -2369,50 +2060,6 @@
       "held_back_reason": "sample today: 4 posts, 50% clean, 1 clean authors"
     },
     {
-      "ticker": "AIR",
-      "cashtag": "$AIR",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "AIRE",
-      "cashtag": "$AIRE",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "ALAB",
       "cashtag": "$ALAB",
       "tier": "other",
@@ -2433,28 +2080,6 @@
       "sample_clean_share": 0.11,
       "held_back": true,
       "held_back_reason": "sample today: 19 posts, 11% clean, 1 clean authors"
-    },
-    {
-      "ticker": "ALEC",
-      "cashtag": "$ALEC",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
     },
     {
       "ticker": "ALMR",
@@ -2521,28 +2146,6 @@
       "sample_clean_share": 0.29,
       "held_back": true,
       "held_back_reason": "sample today: 17 posts, 29% clean, 3 clean authors"
-    },
-    {
-      "ticker": "APP",
-      "cashtag": "$APP",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 11,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.27,
-      "held_back": true,
-      "held_back_reason": "sample today: 11 posts, 27% clean, 2 clean authors"
     },
     {
       "ticker": "ARKT",
@@ -2632,50 +2235,6 @@
       "held_back_reason": "sample today: 17 posts, 6% clean, 1 clean authors"
     },
     {
-      "ticker": "BAC",
-      "cashtag": "$BAC",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "BARK",
-      "cashtag": "$BARK",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.67,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 67% clean, 2 clean authors"
-    },
-    {
       "ticker": "BDX",
       "cashtag": "$BDX",
       "tier": "other",
@@ -2696,28 +2255,6 @@
       "sample_clean_share": 0.04,
       "held_back": true,
       "held_back_reason": "sample today: 27 posts, 4% clean, 1 clean authors"
-    },
-    {
-      "ticker": "BE",
-      "cashtag": "$BE",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 65,
-      "sample_clean_authors": 16,
-      "sample_clean_share": 0.28,
-      "held_back": true,
-      "held_back_reason": "sample today: 65 posts, 28% clean, 16 clean authors"
     },
     {
       "ticker": "BFRI",
@@ -2786,28 +2323,6 @@
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
     },
     {
-      "ticker": "BRUN",
-      "cashtag": "$BRUN",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
       "ticker": "BTDR",
       "cashtag": "$BTDR",
       "tier": "other",
@@ -2819,94 +2334,6 @@
       "day_hours": 24,
       "upper_bound": null,
       "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "BULL",
-      "cashtag": "$BULL",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CAM",
-      "cashtag": "$CAM",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CANE",
-      "cashtag": "$CANE",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CAPE",
-      "cashtag": "$CAPE",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
       "last_measured": null,
       "sources": [
         "sample"
@@ -3006,28 +2433,6 @@
       "held_back_reason": "sample today: 6 posts, 17% clean, 1 clean authors"
     },
     {
-      "ticker": "CERT",
-      "cashtag": "$CERT",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "CFG",
       "cashtag": "$CFG",
       "tier": "other",
@@ -3050,28 +2455,6 @@
       "held_back_reason": "sample today: 7 posts, 14% clean, 1 clean authors"
     },
     {
-      "ticker": "CHAT",
-      "cashtag": "$CHAT",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
       "ticker": "CHD",
       "cashtag": "$CHD",
       "tier": "other",
@@ -3092,28 +2475,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CHIP",
-      "cashtag": "$CHIP",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 4,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.25,
-      "held_back": true,
-      "held_back_reason": "sample today: 4 posts, 25% clean, 1 clean authors"
     },
     {
       "ticker": "CHRN",
@@ -3158,28 +2519,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CIEN",
-      "cashtag": "$CIEN",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.17,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 17% clean, 1 clean authors"
     },
     {
       "ticker": "CLSK",
@@ -3248,52 +2587,8 @@
       "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
     },
     {
-      "ticker": "CMC",
-      "cashtag": "$CMC",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "CMG",
       "cashtag": "$CMG",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CMS",
-      "cashtag": "$CMS",
       "tier": "other",
       "asset_type": "Stock",
       "status": "seen",
@@ -3336,72 +2631,6 @@
       "held_back_reason": "sample today: 16 posts, 19% clean, 3 clean authors"
     },
     {
-      "ticker": "COMP",
-      "cashtag": "$COMP",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "CON",
-      "cashtag": "$CON",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "COR",
-      "cashtag": "$COR",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "CORZ",
       "cashtag": "$CORZ",
       "tier": "other",
@@ -3420,27 +2649,6 @@
       "sample_posts": 17,
       "sample_clean_authors": 7,
       "sample_clean_share": 0.71,
-      "held_back": false
-    },
-    {
-      "ticker": "COST",
-      "cashtag": "$COST",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 4,
-      "sample_clean_share": 0.67,
       "held_back": false
     },
     {
@@ -3576,28 +2784,6 @@
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
     },
     {
-      "ticker": "CVS",
-      "cashtag": "$CVS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "CVX",
       "cashtag": "$CVX",
       "tier": "other",
@@ -3618,28 +2804,6 @@
       "sample_clean_share": 0.33,
       "held_back": true,
       "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
-      "ticker": "DELL",
-      "cashtag": "$DELL",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 20,
-      "sample_clean_authors": 3,
-      "sample_clean_share": 0.15,
-      "held_back": true,
-      "held_back_reason": "sample today: 20 posts, 15% clean, 3 clean authors"
     },
     {
       "ticker": "DJT",
@@ -3686,50 +2850,6 @@
       "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
     },
     {
-      "ticker": "DOG",
-      "cashtag": "$DOG",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 26,
-      "sample_clean_authors": 3,
-      "sample_clean_share": 0.12,
-      "held_back": true,
-      "held_back_reason": "sample today: 26 posts, 12% clean, 3 clean authors"
-    },
-    {
-      "ticker": "DRIP",
-      "cashtag": "$DRIP",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 4,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.75,
-      "held_back": true,
-      "held_back_reason": "sample today: 4 posts, 75% clean, 2 clean authors"
-    },
-    {
       "ticker": "DUOL",
       "cashtag": "$DUOL",
       "tier": "other",
@@ -3750,28 +2870,6 @@
       "sample_clean_share": 0.2,
       "held_back": true,
       "held_back_reason": "sample today: 5 posts, 20% clean, 1 clean authors"
-    },
-    {
-      "ticker": "DX",
-      "cashtag": "$DX",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
     },
     {
       "ticker": "EOSE",
@@ -3796,160 +2894,6 @@
       "held_back_reason": "sample today: 4 posts, 25% clean, 1 clean authors"
     },
     {
-      "ticker": "ES",
-      "cashtag": "$ES",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "F",
-      "cashtag": "$F",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 4,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.75,
-      "held_back": true,
-      "held_back_reason": "sample today: 4 posts, 75% clean, 2 clean authors"
-    },
-    {
-      "ticker": "FLY",
-      "cashtag": "$FLY",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
-      "ticker": "FORM",
-      "cashtag": "$FORM",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.17,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 17% clean, 1 clean authors"
-    },
-    {
-      "ticker": "GE",
-      "cashtag": "$GE",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 24,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.04,
-      "held_back": true,
-      "held_back_reason": "sample today: 24 posts, 4% clean, 1 clean authors"
-    },
-    {
-      "ticker": "GS",
-      "cashtag": "$GS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 4,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.25,
-      "held_back": true,
-      "held_back_reason": "sample today: 4 posts, 25% clean, 1 clean authors"
-    },
-    {
-      "ticker": "HD",
-      "cashtag": "$HD",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 33% clean, 2 clean authors"
-    },
-    {
       "ticker": "HUMA",
       "cashtag": "$HUMA",
       "tier": "other",
@@ -3970,27 +2914,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "HUT",
-      "cashtag": "$HUT",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 11,
-      "sample_clean_authors": 3,
-      "sample_clean_share": 0.45,
-      "held_back": false
     },
     {
       "ticker": "HYMC",
@@ -4125,71 +3048,6 @@
       "held_back_reason": "sample today: 3 posts, 100% clean, 1 clean authors"
     },
     {
-      "ticker": "KEEL",
-      "cashtag": "$KEEL",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 33% clean, 2 clean authors"
-    },
-    {
-      "ticker": "KEYS",
-      "cashtag": "$KEYS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "KO",
-      "cashtag": "$KO",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 9,
-      "sample_clean_authors": 4,
-      "sample_clean_share": 0.44,
-      "held_back": false
-    },
-    {
       "ticker": "LGLV",
       "cashtag": "$LGLV",
       "tier": "other",
@@ -4210,49 +3068,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "LIT",
-      "cashtag": "$LIT",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 42,
-      "sample_clean_authors": 17,
-      "sample_clean_share": 0.64,
-      "held_back": false
-    },
-    {
-      "ticker": "LITE",
-      "cashtag": "$LITE",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 31,
-      "sample_clean_authors": 7,
-      "sample_clean_share": 0.26,
-      "held_back": true,
-      "held_back_reason": "sample today: 31 posts, 26% clean, 7 clean authors"
     },
     {
       "ticker": "LLY",
@@ -4298,28 +3113,6 @@
       "held_back_reason": "sample today: 2 posts, 100% clean, 1 clean authors"
     },
     {
-      "ticker": "LULU",
-      "cashtag": "$LULU",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "LUNC",
       "cashtag": "$LUNC",
       "tier": "other",
@@ -4339,50 +3132,6 @@
       "sample_clean_authors": 4,
       "sample_clean_share": 0.5,
       "held_back": false
-    },
-    {
-      "ticker": "MADE",
-      "cashtag": "$MADE",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
-      "ticker": "MAGS",
-      "cashtag": "$MAGS",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 100% clean, 1 clean authors"
     },
     {
       "ticker": "MCD",
@@ -4417,28 +3166,6 @@
       "day_hours": 24,
       "upper_bound": null,
       "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "MOVE",
-      "cashtag": "$MOVE",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
       "last_measured": null,
       "sources": [
         "sample"
@@ -4646,28 +3373,6 @@
       "held_back": false
     },
     {
-      "ticker": "NOW",
-      "cashtag": "$NOW",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 22,
-      "sample_clean_authors": 4,
-      "sample_clean_share": 0.18,
-      "held_back": true,
-      "held_back_reason": "sample today: 22 posts, 18% clean, 4 clean authors"
-    },
-    {
       "ticker": "NSPR",
       "cashtag": "$NSPR",
       "tier": "other",
@@ -4688,28 +3393,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "NU",
-      "cashtag": "$NU",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
     },
     {
       "ticker": "NVII",
@@ -4843,28 +3526,6 @@
       "held_back_reason": "sample today: 16 posts, 19% clean, 3 clean authors"
     },
     {
-      "ticker": "PB",
-      "cashtag": "$PB",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "PBM",
       "cashtag": "$PBM",
       "tier": "other",
@@ -4909,50 +3570,6 @@
       "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
     },
     {
-      "ticker": "PENG",
-      "cashtag": "$PENG",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 16,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.06,
-      "held_back": true,
-      "held_back_reason": "sample today: 16 posts, 6% clean, 1 clean authors"
-    },
-    {
-      "ticker": "PEP",
-      "cashtag": "$PEP",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "PFF",
       "cashtag": "$PFF",
       "tier": "other",
@@ -4973,28 +3590,6 @@
       "sample_clean_share": 1.0,
       "held_back": true,
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "PG",
-      "cashtag": "$PG",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 10,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.2,
-      "held_back": true,
-      "held_back_reason": "sample today: 10 posts, 20% clean, 2 clean authors"
     },
     {
       "ticker": "POAS",
@@ -5063,28 +3658,6 @@
       "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
     },
     {
-      "ticker": "PUMP",
-      "cashtag": "$PUMP",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
       "ticker": "PWR",
       "cashtag": "$PWR",
       "tier": "other",
@@ -5105,28 +3678,6 @@
       "sample_clean_share": 0.5,
       "held_back": true,
       "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "QS",
-      "cashtag": "$QS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
     },
     {
       "ticker": "QTI",
@@ -5393,50 +3944,6 @@
       "held_back_reason": "sample today: 4 posts, 75% clean, 1 clean authors"
     },
     {
-      "ticker": "SI",
-      "cashtag": "$SI",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 3,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.33,
-      "held_back": true,
-      "held_back_reason": "sample today: 3 posts, 33% clean, 1 clean authors"
-    },
-    {
-      "ticker": "SKY",
-      "cashtag": "$SKY",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "SLNH",
       "cashtag": "$SLNH",
       "tier": "other",
@@ -5481,27 +3988,6 @@
       "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
     },
     {
-      "ticker": "SMH",
-      "cashtag": "$SMH",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 57,
-      "sample_clean_authors": 20,
-      "sample_clean_share": 0.74,
-      "held_back": false
-    },
-    {
       "ticker": "SMR",
       "cashtag": "$SMR",
       "tier": "other",
@@ -5513,28 +3999,6 @@
       "day_hours": 24,
       "upper_bound": null,
       "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 50% clean, 1 clean authors"
-    },
-    {
-      "ticker": "SOAR",
-      "cashtag": "$SOAR",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T19:00:00Z",
       "last_measured": null,
       "sources": [
         "sample"
@@ -5807,28 +4271,6 @@
       "held_back_reason": "sample today: 40 posts, 2% clean, 1 clean authors"
     },
     {
-      "ticker": "TER",
-      "cashtag": "$TER",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 4,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 0.25,
-      "held_back": true,
-      "held_back_reason": "sample today: 4 posts, 25% clean, 1 clean authors"
-    },
-    {
       "ticker": "THYP",
       "cashtag": "$THYP",
       "tier": "other",
@@ -5960,28 +4402,6 @@
       "held_back_reason": "sample today: 2 posts, 100% clean, 2 clean authors"
     },
     {
-      "ticker": "UPS",
-      "cashtag": "$UPS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T23:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
       "ticker": "USMV",
       "cashtag": "$USMV",
       "tier": "other",
@@ -5993,71 +4413,6 @@
       "day_hours": 24,
       "upper_bound": null,
       "first_seen": "2026-10-16T14:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 1 posts, 100% clean, 1 clean authors"
-    },
-    {
-      "ticker": "USO",
-      "cashtag": "$USO",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T04:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 6,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.5,
-      "held_back": true,
-      "held_back_reason": "sample today: 6 posts, 50% clean, 2 clean authors"
-    },
-    {
-      "ticker": "V",
-      "cashtag": "$V",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
-      "last_measured": null,
-      "sources": [
-        "sample"
-      ],
-      "sample_posts": 10,
-      "sample_clean_authors": 3,
-      "sample_clean_share": 0.3,
-      "held_back": false
-    },
-    {
-      "ticker": "VELO",
-      "cashtag": "$VELO",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "seen",
-      "count": null,
-      "exact_part": null,
-      "exact_hours": 0,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-16T09:00:00Z",
       "last_measured": null,
       "sources": [
         "sample"
