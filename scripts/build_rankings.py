@@ -123,6 +123,8 @@ COLLISION_RATIO_MIN_BARE = 50     # ... only for bare counts >= 50 (tiny counts:
 COLLISION_NO_HISTORY_MIN = 300    # no $cashtag history at all and bare 5h count > 300 -> suspected
 COLLISION_MIN_REAL_SHARE = 0.3    # an own sample with >= 30% real mentions clears a suspected ticker
 COLLISION_MIN_OWN_POSTS = 10      # ... from >= 10 own sampled posts (72h)
+COLLISION_EXEMPT_MEDIAN = 100    # tickers with a median $cashtag 5h count >= 100 are exempt (2026-10-19: AMD 8.7x
+                                  # its median 207 in the 01:18 run; core, megacap and context tickers are exempt too)
 COLLISION_QUEUE_SHARE = 0.5       # queued suspected tickers take at most this share of the own-sample slots
 CLEAN_CHECK_MAX_AGE_HOURS = 24   # a carryover ticker's last passed clean check may be at most this old
 MAX_CASHTAGS_PER_POST = 8    # posts with more cashtags are always a ticker dump
@@ -784,13 +786,16 @@ def collision_guard_rule():
     return {"label": "suspected-word-collision",
             "rule": ("bare mode: a ticker is held back when its bare 5h count is > %gx the median of its $cashtag 5h "
                      "counts before %s (only for bare counts >= %d), or when it has no $cashtag history and the bare "
-                     "count is > %d; it is queued for an own recency sample in the next run and ranked (with the "
+                     "count is > %d (exempt: core, megacap and context tickers, and tickers with a median $cashtag 5h "
+                     "count >= %d; they are scaled by their own-sample clean share as usual); it is queued for an own recency sample in the next run and ranked (with the "
                      "cleaned estimate, label collision-check-passed) once >= %d own sampled posts in 72h show >= "
                      "%.0f%% real mentions" % (COLLISION_RATIO, BARE_SINCE, COLLISION_RATIO_MIN_BARE,
-                                               COLLISION_NO_HISTORY_MIN, COLLISION_MIN_OWN_POSTS,
+                                               COLLISION_NO_HISTORY_MIN, COLLISION_EXEMPT_MEDIAN,
+                                               COLLISION_MIN_OWN_POSTS,
                                                100 * COLLISION_MIN_REAL_SHARE)),
             "ratio": COLLISION_RATIO, "ratio_min_bare": COLLISION_RATIO_MIN_BARE,
             "no_history_min": COLLISION_NO_HISTORY_MIN, "min_real_share": COLLISION_MIN_REAL_SHARE,
+            "exempt": ["core", "megacap", "context", "median_cashtag_5h >= %d" % COLLISION_EXEMPT_MEDIAN],
             "min_own_posts": COLLISION_MIN_OWN_POSTS}
 
 
@@ -1826,8 +1831,23 @@ def collision_trigger(t, mentions):
     return None
 
 
+def collision_exempt(t):
+    """Reason if the word-collision guard does not apply to t: core, megacap and context tickers (they are
+    scaled by their own-sample clean share like every ticker), or a big $cashtag history (median >= 100)."""
+    if t in set(megacap_list()):
+        return "context ticker" if t in set(context_tickers()) else "megacap"
+    if t in set(core_list()):
+        return "core ticker"
+    base = cashtag_baseline().get(t)
+    if base and base[0] >= COLLISION_EXEMPT_MEDIAN:
+        return "median $cashtag 5h count %g >= %d" % (base[0], COLLISION_EXEMPT_MEDIAN)
+    return None
+
+
 def collision_decision(state, t, mentions, end):
-    """None if not suspected; else {"check", "label", "held" (reason or None), "queue" (needs an own sample)}."""
+    """None if not suspected (or exempt); else {"check", "label", "held" (reason or None), "queue"}."""
+    if collision_exempt(t):
+        return None
     why = collision_trigger(t, mentions)
     if not why:
         return None
@@ -1891,12 +1911,15 @@ def own_clean_estimate(state, t, end):
     return round((c + OWN_CLEAN_PRIOR_K * prior) / (n + OWN_CLEAN_PRIOR_K), 3), n
 
 
-def own_sample_targets(run, hourly, state, n):
-    """Tickers most likely ranked high whose clean-share evidence is thinnest/stalest."""
+def own_sample_targets(run, hourly, state, n, skip=()):
+    """Tickers most likely ranked high whose clean-share evidence is thinnest/stalest. skip: tickers that already
+    have a sample of their own query in this run (one sample per ticker per run); queued suspected collisions
+    are never skipped (they need the recency sample)."""
     if n <= 0:
         return []
     end = parse_iso(run["window_end"])
     queued = collision_queue(state)[:max(1, int(n * COLLISION_QUEUE_SHARE))] if bare() else []
+    skip = set(skip) - set(queued)
     n -= len(queued)
     if n <= 0:
         return queued
@@ -1911,7 +1934,7 @@ def own_sample_targets(run, hourly, state, n):
     for t, m in pool.items():
         if t in exclude:
             continue
-        if t in queued:
+        if t in queued or t in skip:
             continue
         ev_n, _, _ = own_evidence(state, t, end)
         scored.append((-(m + 1) / (1 + ev_n / 25.0), t))
@@ -1933,6 +1956,52 @@ def measured_today(hourly, t, day):
     return bool(rec) and rec.get("last_window_end") and day_of(rec["last_window_end"]) == day
 
 
+def stage2_targets(run, agg, hourly, state, n_all):
+    """Stage-2 samples: co-mention / leaf-check targets and own-sample targets; every ticker gets at most one
+    sample of its own query per run."""
+    n = min(COMENTION_SAMPLES, n_all)
+    mega = set(run["megacaps"])
+    day = day_of(run["window_end"])
+    seen = hourly["seen"].get(day, {})
+    # tickers whose one-ticker split leaf was sampled in stage 1 already have a sample of their own query in
+    # this run (2026-10-17/18: AUR, MAA, DLA were sampled twice: smp-S02.1.4.3.2 + smp-c-AUR)
+    done = set()
+    for p in run["picks"]["samples1"]:
+        tk = (run["tree"]["nodes"].get(p["target"]) or {}).get("tickers") or []
+        if len(tk) == 1:
+            done.add(tk[0])
+    queued = set(collision_queue(state)) if bare() else set()
+    done_c = done | queued | excluded_tickers()   # queued suspected collisions get an own (recency) sample instead
+    ranked = sorted(((t, a) for t, a in agg.items() if t not in mega and t not in done_c
+                     and not measured_today(hourly, t, day)),
+                    key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
+    chosen = [t for t, a in ranked if clean_ok(a)][:max(0, n - 1)]
+    # unverified hot split leaves: which member is it, and is it clean?
+    leaves = sorted((x for x in fresh_frontier(run) if len(x[1]["tickers"]) <= LEAF_MAX
+                     and (node_resid_24h(run, x[0]) or 0) >= LEAF_MIN_24H),
+                    key=lambda x: -(node_resid_24h(run, x[0]) or 0))
+    for nid, node, m in leaves:
+        for t in node["tickers"]:
+            if len(chosen) >= n:
+                break
+            if t not in chosen and t not in done_c and t not in mega and t not in run["core_order"] and t not in agg \
+                    and len(seen.get(t, {}).get("authors", [])) < MIN_AUTHORS:
+                chosen.append(t)
+    for r in state["risers"]:
+        if len(chosen) >= n:
+            break
+        if r["ticker"] not in chosen and r["ticker"] not in mega and r["ticker"] not in done_c:
+            chosen.append(r["ticker"])
+    for t, a in ranked:
+        if len(chosen) >= n:
+            break
+        if t not in chosen:
+            chosen.append(t)
+    chosen = chosen[:n]
+    own = own_sample_targets(run, hourly, state, n_all - len(chosen), skip=done | set(chosen))
+    return chosen, own
+
+
 def cmd_pick_samples(args):
     run = load_run()
     picks = run["picks"]
@@ -1941,7 +2010,11 @@ def cmd_pick_samples(args):
         sys.exit("group/megacap/split counts not finished (follow next-call, or --force to continue without)")
     rem = reads_remaining(run)
     if picks["samples1"] is None:
-        ff = [x for x in fresh_frontier(run) if x[2]["adjusted"] > 0]
+        # a queued suspected word collision gets its own (recency) sample in stage 2, so its one-ticker split
+        # leaf is not also sampled here (one sample per ticker per run)
+        queued = set(collision_queue(load_state())) if bare() else set()
+        ff = [x for x in fresh_frontier(run) if x[2]["adjusted"] > 0
+              and not (len(x[1]["tickers"]) == 1 and x[1]["tickers"][0] in queued)]
         scored = sorted(ff, key=lambda x: (-(x[2]["adjusted"] / math.sqrt(len(x[1]["tickers"]))), x[0]))
         n = min(SAMPLE_GROUPS, run["targets"]["samples"], rem)
         picks["samples1"] = [{"key": "smp-" + nid, "kind": "node", "target": nid,
@@ -1958,47 +2031,17 @@ def cmd_pick_samples(args):
         sys.exit("stage-1 samples not recorded yet: %s" % ", ".join(pend1))
     if picks["samples2"] is None:
         n_all = min(max(0, run["targets"]["samples"] - len(picks["samples1"])), rem)
-        n = min(COMENTION_SAMPLES, n_all)
         agg, _ = analyze_samples(run)
-        mega = set(run["megacaps"])
         hourly = load_hourly()
-        day = day_of(run["window_end"])
-        seen = hourly["seen"].get(day, {})
-        ranked = sorted(((t, a) for t, a in agg.items() if t not in mega and not measured_today(hourly, t, day)),
-                        key=lambda x: (-len(x[1]["authors"]), -x[1]["posts"], x[0]))
-        chosen = [t for t, a in ranked if clean_ok(a)][:max(0, n - 1)]
-        # unverified hot split leaves: which member is it, and is it clean?
-        leaves = sorted((x for x in fresh_frontier(run) if len(x[1]["tickers"]) <= LEAF_MAX
-                         and (node_resid_24h(run, x[0]) or 0) >= LEAF_MIN_24H),
-                        key=lambda x: -(node_resid_24h(run, x[0]) or 0))
-        for nid, node, m in leaves:
-            for t in node["tickers"]:
-                if len(chosen) >= n:
-                    break
-                if t not in chosen and t not in mega and t not in run["core_order"] and t not in agg \
-                        and len(seen.get(t, {}).get("authors", [])) < MIN_AUTHORS:
-                    chosen.append(t)
-        for r in load_state()["risers"]:
-            if len(chosen) >= n:
-                break
-            if r["ticker"] not in chosen and r["ticker"] not in mega:
-                chosen.append(r["ticker"])
-        for t, a in ranked:
-            if len(chosen) >= n:
-                break
-            if t not in chosen:
-                chosen.append(t)
+        chosen, own = stage2_targets(run, agg, hourly, load_state(), n_all)
         coll = collisions()
-        chosen = chosen[:n]
-        n_own = n_all - len(chosen)
         picks["samples2"] = [{"key": "smp-c-" + t, "kind": "comention", "target": t,
                               "query": sample_ticker_query(t, coll)} for t in chosen]
-        own = own_sample_targets(run, hourly, load_state(), n_own)
         picks["samples2"] += [{"key": "smp-o-" + t, "kind": "own", "target": t, "sort": "recency",
                                "query": ticker_query(t, coll)} for t in own]
         chosen = chosen + ["own:" + t for t in own]
         save_run(run)
-        print("stage 2 (co-mentions / leaf checks): %s" % (", ".join(chosen[:n]) or "none"))
+        print("stage 2 (co-mentions / leaf checks, own samples): %s" % (", ".join(chosen) or "none"))
         print("next: python3 scripts/build_rankings.py next-call   (ONE X call at a time; see PACING)")
         return
     print("samples already picked; next: record pending samples, then pick-candidates")

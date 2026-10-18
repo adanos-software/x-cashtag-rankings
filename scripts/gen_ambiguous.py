@@ -32,7 +32,13 @@ MANUAL_EXTRA = {"SMH", "LOL", "OMG", "WTF", "IMO", "FOMO", "YOLO", "HODL", "MOON
                 "SHOP", "BABA", "MARA", "NIO", "PDD", "CRM",
                 # 2026-10-17 11:17 run, held by the word-collision guard (no $cashtag history): HAIN 8,028 bare,
                 # HAO 1,522, HAVA 1,063 (word/name collisions)
-                "HAIN", "HAO", "HAVA"}
+                "HAIN", "HAO", "HAVA",
+                # 2026-10-19 01:18 run (18-23Z), held by the guard: AUR 4,669 bare (own samples 2% real: the word/name
+                # "aur"), DLA 4,575, MACI 2,595 (0%), MAA 2,163 (0%); AMAN and AURE: own samples ~0% real
+                "AUR", "DLA", "MACI", "MAA", "AMAN", "AURE",
+                # Applied Materials: "amat" is a common word (Indonesian/Malay "very"; own bare sample 2026-10-19 1/25
+                # real). Ambiguous here, but re-admitted in config/context_tickers.txt (counted with a finance clause)
+                "AMAT"}
 # frequent in the corpus only because of the company / ticker itself
 ALLOW = {"AMD", "MRNA", "IBM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG",
          "PLTR", "INTC", "NFLX", "ORCL", "IREN", "WULF", "AAL", "RIVN", "HIMS"}

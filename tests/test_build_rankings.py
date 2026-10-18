@@ -948,6 +948,68 @@ class CollisionGuard(unittest.TestCase):
         self.assertEqual(len(own), 6)
         self.assertNotIn("SHOP", own)
 
+    def test_exempt_core_megacap_context_and_big_history(self):
+        # 2026-10-19 01:18 run (18-23Z): AMD bare 1794 = 8.7x its median $cashtag 5h count 207 -> was held back
+        self.assertIsNotNone(br.collision_trigger("AMD", 1794))
+        self.assertEqual(br.collision_exempt("AMD"), "core ticker")
+        end = br.parse_iso("2026-10-18T23:00:00Z")
+        st = {"tickers": {}, "own_clean_mode": "bare", "own_clean": {}}
+        self.assertIsNone(br.collision_decision(st, "AMD", 1794, end))
+        self.assertEqual(br.collision_exempt("NVDA"), "megacap")
+        for t in ("META", "SPY", "AMAT"):
+            self.assertEqual(br.collision_exempt(t), "context ticker", t)
+        self.assertIsNone(br.collision_exempt("LRCX"))                # not core, median 13: still guarded
+        self.assertIsNotNone(br.collision_decision(st, "LRCX", 133, end))
+        br._CASHTAG_BASE = {"ZZBIG": (150, 12), "ZZEDGE": (100, 3), "ZZSMALL": (99, 12)}
+        self.assertIn(">= 100", br.collision_exempt("ZZBIG"))
+        self.assertIsNone(br.collision_decision(st, "ZZBIG", 5000, end))
+        self.assertIsNone(br.collision_decision(st, "ZZEDGE", 5000, end))
+        self.assertIsNone(br.collision_exempt("ZZSMALL"))
+        d = br.collision_decision(st, "ZZSMALL", 5000, end)
+        self.assertEqual(d["label"], "suspected-word-collision")
+        self.assertIn("exempt", br.collision_guard_rule())
+
+    def test_amd_ranked_and_scaled_not_held(self):
+        # AMD's own samples as in the e947513 state (01:18 run): AMD is exempt, but still scaled by its own-sample real share
+        end = br.parse_iso("2026-10-18T23:00:00Z")
+        st = {"tickers": {}, "own_clean_mode": "bare", "own_clean_prior": 0.31, "own_clean": {"AMD": [
+            {"at": "2026-10-17T09:00:00Z", "n": 24, "clean": 1}, {"at": "2026-10-17T19:00:00Z", "n": 25, "clean": 1},
+            {"at": "2026-10-17T23:00:00Z", "n": 24, "clean": 3}, {"at": "2026-10-18T04:00:00Z", "n": 25, "clean": 0}]}}
+        self.assertIsNone(br.collision_decision(st, "AMD", 1794, end))
+        est, n = br.own_clean_estimate(st, "AMD", end)
+        self.assertGreaterEqual(n, br.COLLISION_MIN_OWN_POSTS)
+        self.assertLess(est, br.LOW_CLEAN_SHARE)            # -> rank_score = 1794 x est, label low-clean-share
+
+    def test_oct19_manual_extra_and_amat_context(self):
+        nm = br.not_measurable()
+        for t in ("AUR", "DLA", "MACI", "MAA", "AMAN", "AURE"):
+            self.assertIn(t, nm, t)
+        self.assertNotIn("AMAT", nm)
+        self.assertIn("AMAT", br.context_tickers())
+        self.assertIn("AMAT", br.megacap_list())                      # counted individually every run
+        self.assertTrue(br.ticker_query("AMAT").startswith("AMAT (stock OR stocks OR shares"))
+        stock, etf, _, _ = br.current_packing(br.load_universe())
+        self.assertNotIn("AMAT", {t for g in stock + etf for t in g})
+
+    def test_stage2_samples_each_ticker_once(self):
+        # 2026-10-17 23Z: the one-ticker leaf S02.1.4.3.2 = [AUR] was sampled in stage 1 and AUR again as smp-c-AUR
+        we = "2026-10-18T23:00:00Z"
+        run_obj = {"window_end": we, "megacaps": ["NVDA"], "core_order": [], "known_24h": {},
+                   "picks": {"samples1": [{"key": "smp-S02.1", "target": "S02.1"}]},
+                   "tree": {"nodes": {"S02.1": {"tickers": ["ZZAA"], "children": [], "parent": "S02"}}},
+                   "counts": {"S02.1": {"buckets": [40] * 29}}}
+        ok = lambda: {"authors": {"a", "b", "c", "d"}, "posts": 8, "total": 10, "share": 0.8, "via": {"smp-S02.1"}}
+        agg = {"ZZAA": ok(), "ZZQQ": ok(), "ZZBB": ok()}
+        hourly = {"tickers": {"ZZAA": {"last_window_end": "2026-10-17T23:00:00Z", "last_5h": 9000, "h": {}}},
+                  "seen": {}}
+        st = {"tickers": {}, "own_clean_mode": "bare", "own_clean": {}, "risers": [{"ticker": "ZZAA"}],
+              "collision_queue": [{"ticker": "ZZQQ"}]}
+        chosen, own = br.stage2_targets(run_obj, agg, hourly, st, 7)
+        self.assertEqual(chosen, ["ZZBB"])                  # not ZZAA (stage-1 leaf), not ZZQQ (gets an own sample)
+        self.assertEqual(own[0], "ZZQQ")
+        self.assertNotIn("ZZAA", own)                       # hottest, but already sampled in this run
+        self.assertEqual(len(chosen + own), len(set(chosen + own)))
+
 
 class Oct17Fixes(unittest.TestCase):
     """2026-10-17 16:21 run: SOFI leak (not-measurable ticker still counted/published), 503 handling, shorter groups."""
