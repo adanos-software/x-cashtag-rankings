@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-18T23:51:34Z",
+  "generated_at": "2026-10-19T04:47:28Z",
   "method": "group-sweep+adaptive-splits+sampling+daily-counts",
   "note": "Expected individual counts of the next run: the megacaps (every run). Everything else, including the rest of the core, is screened in the group sweep and gets one exact daily count per UTC day (split leaves, sample discoveries, hot re-reads, core due today), chosen by `pick-candidates` at run time.",
   "query_pattern": "TICKER -is:retweet <spam suffix>",
@@ -10,7 +10,7 @@
     "mode_since": "2026-10-17T04:23:20Z",
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
-  "count": 18,
+  "count": 19,
   "tickers": [
     {
       "ticker": "SPY",
@@ -101,6 +101,11 @@
       "ticker": "RIOT",
       "tier": "core",
       "source": "megacap"
+    },
+    {
+      "ticker": "AMAT",
+      "tier": "core",
+      "source": "megacap"
     }
   ],
   "core_in_group_sweep": [
@@ -108,20 +113,20 @@
     "NBIS",
     "CRWV",
     "GME",
-    "MSTR",
     "TSM",
     "SNDK",
-    "JPM",
-    "IONQ",
     "AVGO",
+    "MSTR",
+    "IONQ",
+    "INTC",
     "ASTS",
     "ASML",
-    "INTC",
     "GOOG",
     "ORCL",
     "XOM",
     "RKLB",
     "NFLX",
+    "JPM",
     "HIMS",
     "SMCI",
     "IWM",
@@ -134,5 +139,5 @@
     "PYPL",
     "CVNA"
   ],
-  "etf_rotation_next": 6
+  "etf_rotation_next": 9
 }
