@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "partial": 26,
     "exact": 49,
+    "partial": 20,
     "bounded": 50,
     "seen": 38
   },
-  "tickers_seen": 163,
+  "tickers_seen": 157,
   "talked_about_today": 57,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,116 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "WTS",
-      "cashtag": "$WTS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 28758,
-      "exact_hours": 23,
-      "day_hours": 24,
-      "upper_bound": 30887,
-      "first_seen": "2026-10-20T04:00:00Z",
-      "last_measured": "2026-10-20T23:34:57Z",
-      "sources": [
-        "collision-check",
-        "hot-reread",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 7964,
-        "2026-10-20T14:00:00Z": 9308,
-        "2026-10-20T19:00:00Z": 6058,
-        "2026-10-20T23:00:00Z": 1436
-      }
-    },
-    {
-      "ticker": "GPT",
-      "cashtag": "$GPT",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "partial",
-      "count": null,
-      "exact_part": 21545,
-      "exact_hours": 23,
-      "day_hours": 24,
-      "upper_bound": 23105,
-      "first_seen": "2026-10-20T14:00:00Z",
-      "last_measured": "2026-10-20T23:35:34Z",
-      "sources": [
-        "collision-check",
-        "hot-reread",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 4845,
-        "2026-10-20T14:00:00Z": 5675,
-        "2026-10-20T19:00:00Z": 4667,
-        "2026-10-20T23:00:00Z": 2917
-      }
-    },
-    {
-      "ticker": "DEFI",
-      "cashtag": "$DEFI",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "partial",
-      "count": null,
-      "exact_part": 20607,
-      "exact_hours": 23,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-20T09:00:00Z",
-      "last_measured": "2026-10-20T23:35:22Z",
-      "sources": [
-        "collision-check",
-        "hot-reread",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 4944,
-        "2026-10-20T14:00:00Z": 5814,
-        "2026-10-20T19:00:00Z": 5428,
-        "2026-10-20T23:00:00Z": 3046
-      }
-    },
-    {
-      "ticker": "AKAN",
-      "cashtag": "$AKAN",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 18351,
-      "exact_hours": 20,
-      "day_hours": 24,
-      "upper_bound": 29723,
-      "first_seen": "2026-10-20T09:00:00Z",
-      "last_measured": "2026-10-21T09:37:08Z",
-      "sources": [
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 5379 > 300; own sample 125 posts, 0% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 5351,
-        "2026-10-20T14:00:00Z": 6528,
-        "2026-10-20T19:00:00Z": 4652,
-        "2026-10-20T23:00:00Z": 1737
-      }
-    },
     {
       "ticker": "SPCX",
       "cashtag": "$SPCX",
@@ -161,34 +51,6 @@
         "2026-10-20T14:00:00Z": 1513,
         "2026-10-20T19:00:00Z": 1942,
         "2026-10-20T23:00:00Z": 7590
-      }
-    },
-    {
-      "ticker": "PSC",
-      "cashtag": "$PSC",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "partial",
-      "count": null,
-      "exact_part": 13358,
-      "exact_hours": 23,
-      "day_hours": 24,
-      "upper_bound": null,
-      "first_seen": "2026-10-20T19:00:00Z",
-      "last_measured": "2026-10-20T23:36:25Z",
-      "sources": [
-        "collision-check",
-        "hot-reread",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 2923,
-        "2026-10-20T14:00:00Z": 3923,
-        "2026-10-20T19:00:00Z": 1151,
-        "2026-10-20T23:00:00Z": 2230
       }
     },
     {
@@ -473,37 +335,6 @@
         "2026-10-20T14:00:00Z": 621,
         "2026-10-20T19:00:00Z": 720,
         "2026-10-20T23:00:00Z": 727
-      }
-    },
-    {
-      "ticker": "WTI",
-      "cashtag": "$WTI",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "partial",
-      "count": null,
-      "exact_part": 2545,
-      "exact_hours": 23,
-      "day_hours": 24,
-      "upper_bound": 4674,
-      "first_seen": "2026-10-20T04:00:00Z",
-      "last_measured": "2026-10-20T23:37:28Z",
-      "sources": [
-        "collision-check",
-        "hot-reread",
-        "sample",
-        "split-leaf"
-      ],
-      "sample_posts": 2,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "sample today: 2 posts, 100% clean, 2 clean authors",
-      "windows_5h": {
-        "2026-10-20T09:00:00Z": 344,
-        "2026-10-20T14:00:00Z": 812,
-        "2026-10-20T19:00:00Z": 742,
-        "2026-10-20T23:00:00Z": 506
       }
     },
     {
