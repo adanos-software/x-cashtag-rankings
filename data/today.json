@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 43,
+    "exact": 41,
     "partial": 21,
     "bounded": 105,
     "seen": 9
   },
-  "tickers_seen": 178,
+  "tickers_seen": 176,
   "talked_about_today": 57,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,65 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "SORA",
-      "cashtag": "$SORA",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 13422,
-      "exact_part": 13422,
-      "exact_hours": 23,
-      "day_hours": 23,
-      "upper_bound": 13422,
-      "first_seen": "2026-10-23T23:00:00Z",
-      "last_measured": "2026-10-23T23:45:08Z",
-      "sources": [
-        "collision-check",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 2212 > 300; own sample 25 posts, 0% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-23T04:00:00Z": 2921,
-        "2026-10-23T09:00:00Z": 2588,
-        "2026-10-23T14:00:00Z": 3947,
-        "2026-10-23T19:00:00Z": 2884,
-        "2026-10-23T23:00:00Z": 2212
-      }
-    },
-    {
-      "ticker": "SOPH",
-      "cashtag": "$SOPH",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 7299,
-      "exact_part": 7299,
-      "exact_hours": 23,
-      "day_hours": 23,
-      "upper_bound": 7299,
-      "first_seen": "2026-10-23T19:00:00Z",
-      "last_measured": "2026-10-23T23:45:24Z",
-      "sources": [
-        "collision-check",
-        "sample",
-        "split-leaf"
-      ],
-      "sample_posts": 13,
-      "sample_clean_authors": 2,
-      "sample_clean_share": 0.15,
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 1955 > 300; own sample 25 posts, 4% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-23T04:00:00Z": 2107,
-        "2026-10-23T09:00:00Z": 1300,
-        "2026-10-23T14:00:00Z": 1181,
-        "2026-10-23T19:00:00Z": 1461,
-        "2026-10-23T23:00:00Z": 1955
-      }
-    },
     {
       "ticker": "AMD",
       "cashtag": "$AMD",
