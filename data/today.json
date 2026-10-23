@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 43,
+    "exact": 41,
     "partial": 16,
     "bounded": 37,
     "seen": 6
   },
-  "tickers_seen": 102,
+  "tickers_seen": 100,
   "talked_about_today": 54,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,31 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "CAC",
-      "cashtag": "$CAC",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 2719,
-      "exact_part": 2719,
-      "exact_hours": 9,
-      "day_hours": 9,
-      "upper_bound": 2719,
-      "first_seen": "2026-10-23T09:00:00Z",
-      "last_measured": "2026-10-23T09:46:50Z",
-      "sources": [
-        "collision-check",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 1675 > 300; own sample 25 posts, 0% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-23T04:00:00Z": 1199,
-        "2026-10-23T09:00:00Z": 1675
-      }
-    },
     {
       "ticker": "AMD",
       "cashtag": "$AMD",
@@ -205,34 +180,6 @@
       "windows_5h": {
         "2026-10-23T04:00:00Z": 776,
         "2026-10-23T09:00:00Z": 558
-      }
-    },
-    {
-      "ticker": "CABA",
-      "cashtag": "$CABA",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 998,
-      "exact_part": 998,
-      "exact_hours": 9,
-      "day_hours": 9,
-      "upper_bound": 998,
-      "first_seen": "2026-10-23T09:00:00Z",
-      "last_measured": "2026-10-23T09:47:03Z",
-      "sources": [
-        "collision-check",
-        "sample",
-        "split-leaf"
-      ],
-      "sample_posts": 1,
-      "sample_clean_authors": 1,
-      "sample_clean_share": 1.0,
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 315 > 300; own sample 25 posts, 4% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-23T04:00:00Z": 870,
-        "2026-10-23T09:00:00Z": 315
       }
     },
     {
