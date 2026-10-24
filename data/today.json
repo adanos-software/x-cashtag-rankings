@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 45,
+    "exact": 44,
     "partial": 19,
     "bounded": 75,
     "seen": 4
   },
-  "tickers_seen": 143,
+  "tickers_seen": 142,
   "talked_about_today": 54,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,30 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "MAYU",
-      "cashtag": "$MAYU",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "exact",
-      "count": 4494,
-      "exact_part": 4494,
-      "exact_hours": 14,
-      "day_hours": 14,
-      "upper_bound": 4494,
-      "first_seen": "2026-10-24T15:03:59Z",
-      "last_measured": "2026-10-24T15:03:59Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 2174 > 300; no own sample yet -> queued for one next run",
-      "windows_5h": {
-        "2026-10-24T04:00:00Z": 1270,
-        "2026-10-24T09:00:00Z": 1281,
-        "2026-10-24T14:00:00Z": 2174
-      }
-    },
     {
       "ticker": "AMD",
       "cashtag": "$AMD",
