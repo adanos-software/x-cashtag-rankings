@@ -961,24 +961,7 @@
     "clean_gate": "a discovered or carryover ticker is only ranked if a sample of this run (or a passed check <= 24h old) shows clean posts from >= 3 distinct authors and, with >= 5 sampled posts, a clean share >= 30%; others are listed in held_back with their count",
     "sample_clean_share": "sample_clean_share = clean / all sampled posts mentioning the ticker (relevancy samples, small n); informational, the rank stays the exact filtered count; core entries below 30% get the label low-clean-share"
   },
-  "held_back": [
-    {
-      "ticker": "BINT",
-      "mentions": 545,
-      "tier": "discovered",
-      "source": "hot-reread",
-      "reason": "suspected-word-collision: no $cashtag history and bare count 545 > 300; own sample 49 posts, 0% real mentions (< 30%)",
-      "labels": [
-        "low-clean-share",
-        "suspected-word-collision"
-      ],
-      "collision_check": {
-        "reason": "no $cashtag history and bare count 545 > 300",
-        "own_sample_posts_72h": 49,
-        "own_real_share": 0.0
-      }
-    }
-  ],
+  "held_back": [],
   "word_collision_guard": {
     "label": "suspected-word-collision",
     "rule": "bare mode: a ticker is held back when its bare 5h count is > 8x the median of its $cashtag 5h counts before 2026-10-17 (only for bare counts >= 50), or when it has no $cashtag history and the bare count is > 300 (exempt: core, megacap and context tickers, and tickers with a median $cashtag 5h count >= 100; they are scaled by their own-sample clean share as usual); it is queued for an own recency sample in the next run and ranked (with the cleaned estimate, label collision-check-passed) once >= 10 own sampled posts in 72h show >= 30% real mentions",
