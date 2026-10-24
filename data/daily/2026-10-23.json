@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 54,
     "partial": 16,
+    "exact": 53,
     "bounded": 66,
     "seen": 47
   },
-  "tickers_seen": 183,
+  "tickers_seen": 182,
   "talked_about_today": 57,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,32 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "VAMO",
-      "cashtag": "$VAMO",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "exact",
-      "count": 14784,
-      "exact_part": 14784,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 14784,
-      "first_seen": "2026-10-24T04:36:16Z",
-      "last_measured": "2026-10-24T09:40:33Z",
-      "sources": [
-        "collision-check",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 1213 > 300; own sample 25 posts, 0% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-23T09:00:00Z": 706,
-        "2026-10-23T14:00:00Z": 1564,
-        "2026-10-23T19:00:00Z": 3571,
-        "2026-10-23T23:00:00Z": 4601
-      }
-    },
     {
       "ticker": "BINT",
       "cashtag": "$BINT",
