@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 44,
+    "exact": 42,
     "partial": 22,
     "bounded": 84,
     "seen": 15
   },
-  "tickers_seen": 165,
+  "tickers_seen": 163,
   "talked_about_today": 57,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,32 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "SEF",
-      "cashtag": "$SEF",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "exact",
-      "count": 13075,
-      "exact_part": 13075,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 13075,
-      "first_seen": "2026-10-28T00:43:21Z",
-      "last_measured": "2026-10-28T00:43:21Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 2940 > 300; no own sample yet -> queued for one next run",
-      "windows_5h": {
-        "2026-10-27T05:00:00Z": 722,
-        "2026-10-27T10:00:00Z": 2988,
-        "2026-10-27T15:00:00Z": 3440,
-        "2026-10-27T20:00:00Z": 3771,
-        "2026-10-28T00:00:00Z": 2940
-      }
-    },
     {
       "ticker": "AMD",
       "cashtag": "$AMD",
@@ -1050,32 +1024,6 @@
         "2026-10-27T10:00:00Z": 77,
         "2026-10-27T15:00:00Z": 145,
         "2026-10-27T20:00:00Z": 168
-      }
-    },
-    {
-      "ticker": "SECU",
-      "cashtag": "$SECU",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "exact",
-      "count": 393,
-      "exact_part": 393,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 393,
-      "first_seen": "2026-10-28T00:44:00Z",
-      "last_measured": "2026-10-28T00:44:00Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-10-27T05:00:00Z": 68,
-        "2026-10-27T10:00:00Z": 49,
-        "2026-10-27T15:00:00Z": 103,
-        "2026-10-27T20:00:00Z": 119,
-        "2026-10-28T00:00:00Z": 67
       }
     },
     {
