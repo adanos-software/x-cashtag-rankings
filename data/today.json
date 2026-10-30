@@ -11,12 +11,12 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 45,
+    "exact": 44,
     "partial": 21,
     "bounded": 58,
     "seen": 18
   },
-  "tickers_seen": 142,
+  "tickers_seen": 141,
   "talked_about_today": 52,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -25,33 +25,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "ANG",
-      "cashtag": "$ANG",
-      "tier": "other",
-      "asset_type": "ETF",
-      "status": "exact",
-      "count": 54359,
-      "exact_part": 54359,
-      "exact_hours": 20,
-      "day_hours": 20,
-      "upper_bound": 54359,
-      "first_seen": "2026-10-30T20:00:00Z",
-      "last_measured": "2026-10-30T20:43:05Z",
-      "sources": [
-        "collision-check",
-        "sample",
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 8764 > 300; own sample 25 posts, 0% real mentions (< 30%)",
-      "windows_5h": {
-        "2026-10-30T05:00:00Z": 12474,
-        "2026-10-30T10:00:00Z": 13999,
-        "2026-10-30T15:00:00Z": 19122,
-        "2026-10-30T20:00:00Z": 8764
-      }
-    },
     {
       "ticker": "FICS",
       "cashtag": "$FICS",
