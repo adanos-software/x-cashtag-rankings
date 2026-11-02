@@ -11,11 +11,11 @@
     "auto_switch_back": "every bare run starts with a probe call '$NVDA -is:retweet'; if the tool no longer reports that the $ was removed, the script switches back to cashtag queries"
   },
   "status_counts": {
-    "exact": 44,
+    "exact": 42,
     "partial": 3,
     "bounded": 37
   },
-  "tickers_seen": 84,
+  "tickers_seen": 82,
   "talked_about_today": 42,
   "fields": {
     "status": "exact = every hour of the day so far measured individually (count is exact); partial = some hours exact (exact_part), the rest only bounded; bounded = only an upper bound from the smallest measured group/split node containing the ticker; seen = mentioned in a sample, no count",
@@ -24,28 +24,6 @@
     "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)"
   },
   "tickers": [
-    {
-      "ticker": "NHI",
-      "cashtag": "$NHI",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 31313,
-      "exact_part": 31313,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 31313,
-      "first_seen": "2026-11-02T07:40:47Z",
-      "last_measured": "2026-11-02T07:40:47Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "suspected-word-collision: no $cashtag history and bare count 10459 (12h; 4358 per 5h) > 300; no own sample yet -> queued for one next run",
-      "windows_5h": {
-        "2026-11-01T20:00:00Z": 19654
-      }
-    },
     {
       "ticker": "AMD",
       "cashtag": "$AMD",
@@ -373,28 +351,6 @@
       "held_back": false,
       "windows_5h": {
         "2026-11-01T20:00:00Z": 734
-      }
-    },
-    {
-      "ticker": "NGS",
-      "cashtag": "$NGS",
-      "tier": "other",
-      "asset_type": "Stock",
-      "status": "exact",
-      "count": 1090,
-      "exact_part": 1090,
-      "exact_hours": 24,
-      "day_hours": 24,
-      "upper_bound": 1090,
-      "first_seen": "2026-11-02T07:41:16Z",
-      "last_measured": "2026-11-02T07:41:16Z",
-      "sources": [
-        "split-leaf"
-      ],
-      "held_back": true,
-      "held_back_reason": "no clean sample evidence today",
-      "windows_5h": {
-        "2026-11-01T20:00:00Z": 553
       }
     },
     {
