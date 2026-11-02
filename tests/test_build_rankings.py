@@ -14,6 +14,9 @@ TMP = tempfile.mkdtemp(prefix="xcr-test-")
 for d in ("scripts", "config", "data"):
     shutil.copytree(os.path.join(REPO, d), os.path.join(TMP, d))
 os.environ["XCR_ROOT"] = TMP
+# the mechanics tests below were calibrated on the 5h window (method until 2026-11-01); the 12h default since
+# 2026-11-02 is covered by Window12h, which loads a second copy of the module without the override
+os.environ["XCR_WINDOW_HOURS"] = "5"
 MODE_FILE = os.path.join(TMP, "data", "query_mode.json")
 
 
@@ -1119,3 +1122,37 @@ class Oct17Fixes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Window12h(unittest.TestCase):
+    """Default window since 2026-11-02: trailing 12h, 36 hourly buckets, collision guard scaled to 5h."""
+    @classmethod
+    def setUpClass(cls):
+        old = os.environ.pop("XCR_WINDOW_HOURS")
+        try:
+            sp = importlib.util.spec_from_file_location("br12", os.path.join(TMP, "scripts", "build_rankings.py"))
+            cls.m = importlib.util.module_from_spec(sp)
+            sp.loader.exec_module(cls.m)
+        finally:
+            os.environ["XCR_WINDOW_HOURS"] = old
+
+    def test_constants(self):
+        self.assertEqual((self.m.WINDOW_HOURS, self.m.HISTORY_HOURS), (12, 36))
+
+    def test_metrics_use_12h_and_same_hours_yesterday(self):
+        b = [1] * 12 + [2] * 12 + [3] * 12
+        m = self.m.metrics(b)
+        self.assertEqual((m["mentions"], m["prev_day_same_hours"]), (36, 12))
+        self.assertEqual(m["last_hour_prev_day"], 1)
+
+    def test_window_is_trailing_12h(self):
+        from datetime import datetime, timezone
+        s, e = self.m.window_for(datetime(2026, 11, 2, 7, 15, tzinfo=timezone.utc))
+        self.assertEqual((s.hour, e.hour, (e - s).total_seconds()), (19, 7, 12 * 3600))
+
+    def test_collision_guard_scales_to_5h(self):
+        self.m._CASHTAG_BASE = {"ZZZQ": (10, 5)}
+        self.assertIsNone(self.m.collision_trigger("ZZZQ", 190))      # 79 per 5h < 8 x 10
+        self.assertIsNotNone(self.m.collision_trigger("ZZZQ", 200))   # 83 per 5h > 80
+        self.assertIsNone(self.m.collision_trigger("NOHIST", 700))    # 292 per 5h <= 300
+        self.assertIsNotNone(self.m.collision_trigger("NOHIST", 730))

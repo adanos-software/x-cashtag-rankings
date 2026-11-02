@@ -2,7 +2,7 @@
 
 How often US-listed **stock and ETF** cashtags (e.g. `$NVDA`) were mentioned on [X](https://x.com) in a trailing **5-hour** window, plus which ones are **rising**. Everything comes straight from X: official recent post counts and a few post samples. No third-party "trending" lists are used.
 
-**Stocks/ETFs only** (no crypto coins). Updated **every 5 hours** on `main`, with runs at 01:14, 06:14, 11:14, 16:14 and 21:14 Europe/Berlin time. All timestamps in the data are UTC.
+**Stocks/ETFs only** (no crypto coins). Rankings cover the **trailing 12 hours, refreshed twice daily (~08:00 and ~20:00 Berlin)** on `main` (since 2026-11-02; 2026-10-08 to 2026-11-01: trailing 5 hours, refreshed every 5 hours). All timestamps in the data are UTC.
 
 **Latest:** [`data/latest.json`](data/latest.json) · **Today (every ticker seen this UTC day):** [`data/today.json`](data/today.json) · **Past days:** [`data/daily/`](data/daily/) · **History:** [`data/history/`](data/history/)
 
@@ -33,7 +33,7 @@ Built by [Adanos Sentiment](https://adanos.org) (`@adanos_api`).
 >   (a finance word from [`config/context_terms.txt`](config/context_terms.txt) or another `$cashtag`; context tickers must be
 >   upper case). 6 own recency samples per run; prior 0.5 until evidence accumulates (cashtag-era shares were reset).
 > - Split tree, hourly series and own-sample evidence of the cashtag era are not mixed with bare counts (reset on the mode change).
-> - **Word-collision guard:** a ticker whose bare 5h count is more than **8×** the median of its `$cashtag` 5h counts before
+> - **Word-collision guard:** a ticker whose bare count (scaled to 5h: 12h count × 5/12) is more than **8×** the median of its `$cashtag` 5h counts before
 >   2026-10-17 (bare count ≥ 50), or that has no `$cashtag` history and a bare count above **300**, is held back
 >   (`held_back`, label `suspected-word-collision`) and queued (`collision_queue`) for an own recency sample in the next run. Once
 >   ≥ 10 own sampled posts (72 h) show **≥ 30 %** real mentions it is ranked with the cleaned estimate (label
@@ -53,12 +53,12 @@ The question is *which tickers X users are talking about today*, so breadth come
 
 | Step | Reads per run | What it does | Exact or sampled |
 |---|---|---|---|
-| 1. Group sweep (stocks) | 13 | **Every US stock except the 10 megacaps (~5,410 tickers, the rest of the core included)** is packed into OR-groups: `($A OR $B OR ...) -is:retweet <spam filter>`, ≤ 4096 characters (~360–430 tickers per group), each counted with 29 hourly buckets. | Exact group counts |
+| 1. Group sweep (stocks) | 13 | **Every US stock except the 10 megacaps (~5,410 tickers, the rest of the core included)** is packed into OR-groups: `($A OR $B OR ...) -is:retweet <spam filter>`, ≤ 4096 characters (~360–430 tickers per group), each counted with 36 hourly buckets. | Exact group counts |
 | 1b. Group sweep (ETFs) | 3 | The ~5,470 ETFs (minus SPY/QQQ) in 14 groups; **3 rotate per run**, so every ETF group is screened about once a day. | Exact group counts |
 | 2. Megacaps | 10 | [`config/megacaps.txt`](config/megacaps.txt) (SPY, QQQ, NVDA, TSLA, AAPL, MSFT, AMZN, META, GOOGL, PLTR) are counted individually every run. | Exact individual counts |
 | 3. Adaptive splits | up to 24 | Hot groups are cut into 4 parts, recursively ("drill chains", below). The split tree is kept across runs in [`data/splits.json`](data/splits.json). | Exact group counts (one part per split by subtraction) |
 | 4. Sampling | 10 | 6 relevancy-sorted samples (25 posts) of the hottest groups/split parts (per ticker), then 4 co-mention samples on new tickers, unverified split leaves or the last risers. | **Sampled** |
-| 5. Daily exact counts | ~31 | One 29h count per ticker **per UTC day**: split leaves, sample discoveries that pass the clean check, the core not yet counted today (≥ 10 per run, so all 50 get one a day), and re-reads of tickers that are still hot (5h count ≥ 60, ≤ 8 per run). | Exact individual counts |
+| 5. Daily exact counts | ~31 | One 36h count per ticker **per UTC day**: split leaves, sample discoveries that pass the clean check, the core not yet counted today (≥ 10 per run, so all 50 get one a day), and re-reads of tickers that are still hot (last-5h count ≥ 60, ≤ 8 per run). | Exact individual counts |
 | Spare | 4 | Retries and invalid requests. | |
 
 **Adaptive splits (heavy-hitter search):** a split cuts a node (a group or part) into 4 contiguous parts. If the node was counted in this run, 3 parts are counted and the 4th is *node − 3 parts* per hour (≥ 0; posts that mention tickers of two parts make it an under-estimate, and the run reports any `overlap_warning`); a node counted in an earlier run needs all 4 parts. The script splits in this order: (1) continue into a part created in this run that holds ≥ 1.6× its fair share of the parent's posts, (2) resume such a part from an earlier run, (3) start on a root group not split yet, (4) re-split a root whose old parts are stale; within a class the node with the most posts in the last 24h goes first. Counts of tickers already measured individually in the last 30h are subtracted before choosing ("explained away"), so core names inside a group don't attract every drill. Nodes with ≤ 3 tickers are leaves: their members get exact daily counts. A drill to one busy ticker costs ~12 reads (400 → 100 → 25 → 7 → 2). The tree is validated on every plan and build and the script **fails closed** if it is inconsistent; parts not re-measured for 30h are pruned and cold splits collapse.
@@ -71,18 +71,18 @@ The question is *which tickers X users are talking about today*, so breadth come
 - `status`: `exact` (every hour of the day so far counted individually; `count` is exact), `partial` (some hours exact: `exact_part`; the rest only bounded), `bounded` (only an upper bound), `seen` (sampled, no count),
 - `upper_bound`: exact hours + for every other hour the smallest measured group/part containing the ticker (subtracted parts are not used as bounds),
 - `first_seen`, `last_measured`, `sources` (`megacap`, `core-daily`, `split-leaf`, `sample`, `hot-reread`), `sample_clean_share`, `held_back` (+ reason),
-- `windows_5h`: exact 5h window counts **back-filled from hourly buckets** (one 29h read covers every earlier window of the day).
+- `windows_5h` (name kept for compatibility): exact window counts (12h since 2026-11-02) **back-filled from hourly buckets** (one 36h read covers every earlier window of the day).
 
 The previous day is finalised in `data/daily/<YYYY-MM-DD>.json` (re-written by the runs of the following day, which back-fill its last hours). The hourly series behind it are in `data/hourly.json` (last ~2 UTC days).
 
 ### Counting details
 
 - **Individual query:** `$TICKER -is:retweet <spam filter>` (bare mode since 2026-10-17: `TICKER -is:retweet <spam filter>`, context tickers with the finance clause) for **every** ticker (megacap, daily count): original posts, replies and quotes, reposts excluded, spam terms excluded. No language filter. **Collision tickers** (below) also get per-ticker terms. (Before 2026-10-10 only collision tickers carried the spam filter; that is how `$TM` got to #5 with memecoin spam.)
-- **Hourly series:** `granularity=hour`, from `window_end − 29h` to `window_end`. One read gives the 5h window (last 5 buckets), the same 5 hours yesterday (first 5 buckets) and the hourly shape.
-- **Window:** the last 5 full UTC hours before the run. For example, a run at 14:14 UTC counts 09:00–14:00 UTC.
-- **Ranking:** by `rank_score` = `rank_score_raw` × `clean_share_est`, i.e. the estimated count of real (clean) posts; `mentions_clean_est` = `mentions` × `clean_share_est`. `rank_score_raw` is the exact 5h count with collapsed bursts capped (see below). `mentions` always stays the exact raw count.
+- **Hourly series:** `granularity=hour`, from `window_end − 36h` to `window_end`. One read gives the 12h window (last 12 buckets), the same 12 hours yesterday (first 12 buckets) and the hourly shape.
+- **Window:** the trailing 12 full UTC hours before the run, refreshed twice daily (~08:00 and ~20:00 Berlin). For example, a run at 07:15 UTC counts 19:00–07:00 UTC.
+- **Ranking:** by `rank_score` = `rank_score_raw` × `clean_share_est`, i.e. the estimated count of real (clean) posts; `mentions_clean_est` = `mentions` × `clean_share_est`. `rank_score_raw` is the exact 12h count with collapsed bursts capped (see below). `mentions` always stays the exact raw count.
 - **Momentum:**
-  - `momentum_5h_vs_prev_day` = (5h + 1) / (same 5h yesterday + 1)
+  - `momentum_5h_vs_prev_day` (name kept for compatibility) = (window count + 1) / (same 12h yesterday + 1)
   - `momentum_last_hour_vs_prev_9h` = (last hour + 1) / (average of the 9 hours before + 1)
   - `mentions_last_hour_prev_day` = the same hour yesterday
   - The +1 keeps tickers with no posts yesterday from producing infinite ratios.
@@ -111,7 +111,7 @@ posts were ticker dumps and "DM me" lists.
 - **Clean share (ranks):** every run takes 4+ **own** recency samples (`smp-o-<T>`, the ticker's own query, newest posts) of the likely top / least-evidenced tickers. `clean_share_est` = (clean + 10 × prior) / (posts + 10) over the ticker's own samples of the last 72h; prior = pooled own-sample share (default 0.8; label `clean-share-prior` when the ticker has no own evidence). Below 30% → `low-clean-share`. `sample_clean_share` comes from co-mentions in other samples (mostly list dumps, e.g. META 9% vs 92% in its own posts, 2026-10-13) and is informational only.
 - **Crypto:** a post is crypto if it carries ≥ 2 crypto cashtags (BTC, ETH, XRP, QNT, …), any USDT/USDC, an `X/USDT` pair or words like altcoin/blockchain/on-chain/defi/web3. A non-core ticker whose sampled posts are ≥ 40% crypto (≥ 5 posts) is held back (`crypto-collision`). `$QNT` is excluded.
 - **Group activity score (`heat`):** excess over each group's baseline, with the baseline scaled by the median ratio of all groups of the same kind in the run. Before 2026-10-11 it was unscaled, so in quiet-market runs (Saturday vs Friday evening) every group scored 0.0 and sample groups were picked by tie-break.
-- **Bursts:** an hour above 6 × max(29h hourly median, 3) that collapses in the next hour (to less than a third) is a bot or pump burst. It is labelled `burst`, listed in `burst_hours`, and that hour is capped at the limit in `rank_score`. A spike in the **last** hour can't be judged yet: it gets the label `spike-last-hour` (only if the last hour is also ≥ 2× the previous 9h average; fixed 2026-10-10, `$TM` had it with 40 vs a 9h average of 81.7) but is not down-weighted, so real breakouts are not penalised.
+- **Bursts:** an hour above 6 × max(36h hourly median, 3) that collapses in the next hour (to less than a third) is a bot or pump burst. It is labelled `burst`, listed in `burst_hours`, and that hour is capped at the limit in `rank_score`. A spike in the **last** hour can't be judged yet: it gets the label `spike-last-hour` (only if the last hour is also ≥ 2× the previous 9h average; fixed 2026-10-10, `$TM` had it with 40 vs a 9h average of 81.7) but is not down-weighted, so real breakouts are not penalised.
 
 ### Universe
 
@@ -125,7 +125,7 @@ It is stored in [`data/universe.csv`](data/universe.csv) (10,898 symbols on 2026
 
 ### Read budget
 
-- Since 2026-10-17 17:00 Berlin: about **90 planned X reads per run** (bare mode: 1 probe, 14 stock + 3 ETF groups, 19 megacap/context counts, ≤ 18 split parts, 10 samples = 3 group + 1 co-mention + 6 own, ~22 daily counts, 3 spare), plus a reserve of at most 10 retry reads (**≤ 100 per run**). Group queries are packed to **≤ 3,000 characters** (before: ≤ 4,096; the 503s of 2026-10-17 hit ~4,090-char queries), which gives 14 stock and 16 ETF groups. 5 runs a day uses ≤ 500 reads per UTC day, inside a 600-reads-per-day cap shared with other jobs. Unused split/discovery slots are simply not spent.
+- Since 2026-10-17 17:00 Berlin: about **90 planned X reads per run** (bare mode: 1 probe, 14 stock + 3 ETF groups, 19 megacap/context counts, ≤ 18 split parts, 10 samples = 3 group + 1 co-mention + 6 own, ~22 daily counts, 3 spare), plus a reserve of at most 10 retry reads (**≤ 100 per run**). Group queries are packed to **≤ 3,000 characters** (before: ≤ 4,096; the 503s of 2026-10-17 hit ~4,090-char queries), which gives 14 stock and 16 ETF groups. 2 runs a day use ≤ 200 reads per UTC day (5 runs a day until 2026-11-01), inside a 600-reads-per-day cap shared with other jobs. Unused split/discovery slots are simply not spent.
 - Per day: ~80 group reads (every stock group 5×, every ETF group ~1×), 50 megacap reads, ≤ 120 split reads, 50 samples, ~155 exact daily counts (all 50 core + ~100 discoveries/re-reads).
 - The script generates every query (groups, split parts, tickers, samples) and prints the single next call; the operator never builds one.
 - X calls are made strictly one at a time, with a ~6 s pause after each one (≤10 calls per minute). On a 429: wait 90 s, then 240 s, then give up and pause 300 s before the next call. On a 5xx (e.g. 503): wait 20 s and retry once; a second 5xx skips the call. A run takes about 45–55 minutes.
@@ -167,7 +167,7 @@ Existing fields keep their meaning; everything else is additive. Excerpt (illust
   "method": "group-sweep+adaptive-splits+sampling+daily-counts",
   "source": { "platform": "X", "endpoint": "GET /2/tweets/counts/recent", "query_pattern": "$TICKER -is:retweet <spam filter>",
               "collision_query_pattern": "$TICKER -is:retweet <spam filter> <per-ticker terms>", "granularity": "hour",
-              "history_hours": 29, "metric": "sum of the last 5 hourly buckets (= meta.total_tweet_count over the window)" },
+              "history_hours": 36, "metric": "sum of the last 12 hourly buckets (= meta.total_tweet_count over the window)" },
   "watchlist_size": 10898,
   "scan_count": 70, "ranked_count": 70, "tickers_measured": 70,
   "screened_count": 6265,
@@ -188,7 +188,7 @@ Existing fields keep their meaning; everything else is additive. Excerpt (illust
                 "candidates_found": ["DKI", "IPW", "…"] },
   "risers": [ { "ticker": "IPW", "mentions": 72, "momentum_5h_vs_prev_day": 36.5, "momentum_last_hour_vs_prev_9h": 7.5, "…": "…" } ],
   "universe_source": { "…": "…" },
-  "cadence": "every 5 hours",
+  "cadence": "twice daily (~08:00 and ~20:00 Europe/Berlin), trailing 12 hours",
   "note": "…",
   "rankings": [
     { "rank": 1, "ticker": "NVDA", "cashtag": "$NVDA", "mentions": 343, "tier": "core", "source": "core",
@@ -243,7 +243,7 @@ curl -sL https://raw.githubusercontent.com/adanos-software/x-cashtag-rankings/ma
 python3 scripts/build_rankings.py plan            # window, budget, groups, split tree -> work/run.json
 python3 scripts/build_rankings.py next-call       # the ONE next X call (or the next script step: pick-samples,
                                                   # pick-candidates, build)
-python3 scripts/build_rankings.py record S01=1471:364,344,...   # KEY=TOTAL:29 hourly buckets (oldest first); pauses 4 s
+python3 scripts/build_rankings.py record S01=1471:364,344,...   # KEY=TOTAL:36 hourly buckets (oldest first); pauses 4 s
 python3 scripts/build_rankings.py record-sample smp-S07 --lines work/samples/smp-S07.txt
 python3 scripts/build_rankings.py record-error S05 --kind 429   # prints WAIT 90s / WAIT 240s / RETRY / GIVE UP / STOP
 python3 scripts/build_rankings.py record S07.2=1210:40,38,...   # a split part (the script prints the key and query)

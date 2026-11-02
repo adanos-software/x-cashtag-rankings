@@ -8,7 +8,7 @@ generates every query (groups, split parts, tickers, samples); never build one b
   loop:
     python3 scripts/build_rankings.py next-call      # prints the ONE next X call (or the next script step)
     -> make that single x tool call
-    python3 scripts/build_rankings.py record KEY=TOTAL:b1,...,b29 --reads-left-today B     (counts; pauses 4s)
+    python3 scripts/build_rankings.py record KEY=TOTAL:b1,...,b36 --reads-left-today B     (counts; pauses 4s)
     python3 scripts/build_rankings.py record-sample KEY --lines FILE --reads-left-today B  (samples; pauses 4s)
     python3 scripts/build_rankings.py record-error KEY --kind 429|5xx|other --reads-left-today B   (on errors;
         429: WAIT 90s / WAIT 240s; 5xx: WAIT 20s, one retry; other: RETRY once; GIVE UP / STOP)
@@ -21,7 +21,7 @@ Order: groups (14 stock + 3 ETF, <= 3000 chars each) -> megacaps -> adaptive 4-w
 from the counts just recorded; the tree persists in data/splits.json, fail-closed validation) -> 3 + 1 + 6
 samples -> daily exact counts (split leaves, sample discoveries, hot re-reads, core due today) -> build
 (latest.json, history, today.json, daily/, hourly.json, splits.json, state.json).
-Every count read uses granularity=hour over the last 29 full UTC hours.
+Every count read uses granularity=hour over the last 36 full UTC hours (12h window + same hours yesterday).
 """
 import argparse
 import csv
@@ -62,8 +62,11 @@ QUERY_MODE_JSON = os.path.join(DATA, "query_mode.json")
 DOLLAR_NOTE = "$ was removed from query"     # what the x tools print when they strip the $ (since 2026-10-17)
 BARE_SINCE = "2026-10-17"
 OWN_CLEAN_DEFAULT_PRIOR_BARE = 0.5   # bare mode: prior share of bare matches that are real stock mentions
-WINDOW_HOURS = 5             # ranked window: last 5 full UTC hours
-HISTORY_HOURS = 29           # every count read covers 29 hourly buckets (window + same hours yesterday)
+WINDOW_HOURS = int(os.environ.get("XCR_WINDOW_HOURS", "12"))   # tests pin the old 5h window via XCR_WINDOW_HOURS
+                             # ranked window: last 12 full UTC hours (since 2026-11-02: twice daily, ~08:00/~20:00 Berlin;
+                             # 2026-10-08..2026-11-01: 5h windows every 5 hours)
+HISTORY_HOURS = WINDOW_HOURS + 24   # every count read covers 36 hourly buckets (window + same hours yesterday)
+BASELINE_WINDOW_HOURS = 5    # the pre-bare $cashtag history (collision baseline) and HOT_REREAD_5H are 5h counts
 MAX_QUERY_LEN = 4096         # X rejects longer queries (4099 chars -> invalid request, still costs a read)
 MAX_GROUP_QUERY_LEN = 3000   # group sweep queries are packed to <= 3000 chars (2026-10-17: the 503s hit ~4,090-char
                              # queries); more, shorter groups: 14 stock + 16 ETF groups instead of 10 + 11
@@ -784,7 +787,7 @@ def daily_entries(hourly, day, through, universe, core, mega):
 
 def collision_guard_rule():
     return {"label": "suspected-word-collision",
-            "rule": ("bare mode: a ticker is held back when its bare 5h count is > %gx the median of its $cashtag 5h "
+            "rule": ("bare mode: a ticker is held back when its bare count (scaled to 5h) is > %gx the median of its $cashtag 5h "
                      "counts before %s (only for bare counts >= %d), or when it has no $cashtag history and the bare "
                      "count is > %d (exempt: core, megacap and context tickers, and tickers with a median $cashtag 5h "
                      "count >= %d; they are scaled by their own-sample clean share as usual); it is queued for an own recency sample in the next run and ranked (with the "
@@ -861,7 +864,7 @@ def write_daily(hourly, day, through, universe, core, mega, path, now):
                        "sample, no count"),
             "upper_bound": ("exact hours + for every other hour the minimum count of a measured (not subtracted) "
                             "group/node that contains the ticker; null if some hour has no such node"),
-            "windows_5h": "exact 5h window counts back-filled from hourly buckets (keyed by window end)",
+            "windows_5h": "exact window counts (WINDOW_HOURS h each) back-filled from hourly buckets (keyed by window end)",
             "held_back": "non-core ticker without clean sample evidence today (>= 3 clean authors, >= 30% clean)",
         },
         "tickers": entries,
@@ -885,7 +888,7 @@ def update_hourly(run, hourly, agg, now):
             rec.setdefault("first_measured", c["recorded_at"])
             rec["last_measured"] = c["recorded_at"]
             rec["last_window_end"] = run["window_end"]
-            rec["last_5h"] = sum(c["buckets"][-WINDOW_HOURS:])
+            rec["last_5h"] = sum(c["buckets"][-BASELINE_WINDOW_HOURS:])
             src = (run.get("count_sources") or {}).get(key)
             if src and src not in rec["sources"]:
                 rec["sources"].append(src)
@@ -913,7 +916,7 @@ def update_hourly(run, hourly, agg, now):
 
 
 def metrics(b):
-    """Window/momentum/burst metrics from 29 hourly buckets (oldest first)."""
+    """Window/momentum/burst metrics from HISTORY_HOURS hourly buckets (oldest first)."""
     n = len(b)
     win = b[n - WINDOW_HOURS:]
     m5 = sum(win)
@@ -1287,7 +1290,7 @@ def cmd_plan(args):
         run["log"]["reads_left_history"].append([iso(now), args.reads_left_today])
         run["log"]["left_mark"] = [args.reads_left_today, 0]
     save_run(run)
-    print("window %s -> %s UTC (29h buckets from %s); budget %d reads" % (run["window_start"], run["window_end"],
+    print("window %s -> %s UTC (%dh buckets from %s); budget %d reads" % (run["window_start"], run["window_end"], HISTORY_HOURS,
                                                                           run["history_start"], budget))
     print("targets:", json.dumps(targets), "total", sum(targets.values()))
     print("groups: %d stock (%d tickers incl. %d core) + ETF %s of %d; megacaps: %s"
@@ -1428,9 +1431,9 @@ def record_hint(stage, key):
         return ("python3 scripts/build_rankings.py record-sample %s --lines work/samples/%s.txt "
                 "--reads-left-today <B>" % (key, key))
     if stage == "probe":
-        return ("python3 scripts/build_rankings.py record PROBE=<TOTAL>:<29 buckets> --dollar-removed yes|no "
-                "--reads-left-today <B>   (yes = the tool output contains '%s')" % DOLLAR_NOTE)
-    return "python3 scripts/build_rankings.py record %s=<TOTAL>:<29 buckets> --reads-left-today <B>" % key
+        return ("python3 scripts/build_rankings.py record PROBE=<TOTAL>:<%d buckets> --dollar-removed yes|no "
+                "--reads-left-today <B>   (yes = the tool output contains '%s')" % (HISTORY_HOURS, DOLLAR_NOTE))
+    return "python3 scripts/build_rankings.py record %s=<TOTAL>:<%d buckets> --reads-left-today <B>" % (key, HISTORY_HOURS)
 
 
 def cmd_next_call(args):
@@ -1523,7 +1526,7 @@ def stop_advice(run):
 def parse_record(item):
     m = RECORD_RE.match(item.strip())
     if not m:
-        raise ValueError("bad record %r; expected KEY=TOTAL:b1,b2,...,b29" % item)
+        raise ValueError("bad record %r; expected KEY=TOTAL:b1,b2,...,b36" % item)
     key, total, vals = m.group(1), m.group(2), m.group(3)
     buckets = [int(x) for x in re.split(r"[,\s]+", vals.strip()) if x != ""]
     if len(buckets) != HISTORY_HOURS:
@@ -1820,14 +1823,18 @@ def cashtag_baseline():
 def collision_trigger(t, mentions):
     """Reason string if a bare count looks like a word collision (vs the $cashtag history), else None."""
     base = cashtag_baseline().get(t)
+    full = mentions
+    # the thresholds and the $cashtag baseline are per 5h window; scale a longer window's count down (2026-11-02)
+    mentions = mentions * BASELINE_WINDOW_HOURS / WINDOW_HOURS
     if base is None:
         if mentions > COLLISION_NO_HISTORY_MIN:
-            return "no $cashtag history and bare count %d > %d" % (mentions, COLLISION_NO_HISTORY_MIN)
+            return "no $cashtag history and bare count %d (%dh; %.0f per 5h) > %d" % (
+                full, WINDOW_HOURS, mentions, COLLISION_NO_HISTORY_MIN)
         return None
     med, n = base
     if mentions >= COLLISION_RATIO_MIN_BARE and mentions > COLLISION_RATIO * max(med, 1):
-        return "bare count %d = %.1fx the median $cashtag 5h count %g (%d windows before %s), > %gx" % (
-            mentions, mentions / max(med, 1), med, n, BARE_SINCE, COLLISION_RATIO)
+        return "bare count %d (%dh; %.0f per 5h) = %.1fx the median $cashtag 5h count %g (%d windows before %s), > %gx" % (
+            full, WINDOW_HOURS, mentions, mentions / max(med, 1), med, n, BARE_SINCE, COLLISION_RATIO)
     return None
 
 
@@ -2518,7 +2525,7 @@ def cmd_build(args):
             "context_query_pattern": ("TICKER %s %s" % (context_clause(), coll_terms)) if bare() else None,
             "granularity": "hour",
             "history_hours": HISTORY_HOURS,
-            "metric": "sum of the last 5 hourly buckets (= meta.total_tweet_count over the window)",
+            "metric": "sum of the last %d hourly buckets (= meta.total_tweet_count over the window)" % WINDOW_HOURS,
         },
         "watchlist_size": len(universe),
         "scan_count": n_ind,
@@ -2554,10 +2561,10 @@ def cmd_build(args):
                              % (OWN_CLEAN_PRIOR_K, OWN_CLEAN_PRIOR_K, OWN_CLEAN_MAX_AGE_HOURS,
                                 state.get("own_clean_prior", default_prior()))),
         "ranking_rule": ("rank_score = round(rank_score_raw x clean_share_est), ties by rank_score_raw. "
-                         "rank_score_raw = 5h count, except that a burst hour (an hour > %d x max(29h hourly "
+                         "rank_score_raw = %dh count, except that a burst hour (an hour > %d x max(%dh hourly "
                          "median, %d) whose next hour fell below a third of it) is capped at that limit; "
                          "only differs from mentions for burst-flagged entries; ties by mentions"
-                         % (BURST_FACTOR, BURST_MIN_MEDIAN)),
+                         % (WINDOW_HOURS, BURST_FACTOR, HISTORY_HOURS, BURST_MIN_MEDIAN)),
         "group_sweep": {
             "query_pattern": "(%s OR %s OR ...) " % (qtag("T1"), qtag("T2")) + coll_terms,
             "max_query_chars": MAX_QUERY_LEN,
@@ -2632,7 +2639,7 @@ def cmd_build(args):
             "commit": umeta.get("source_commit"),
             "fetched_at": umeta.get("fetched_at"),
         },
-        "cadence": "every 5 hours",
+        "cadence": "twice daily (~08:00 and ~20:00 Europe/Berlin), trailing %d hours" % WINDOW_HOURS,
         "freshness": ("every ranked ticker was counted individually in THIS run (last_measured = time of its "
                       "count; all over the same UTC window). Tickers measured in earlier runs today are in "
                       "data/today.json, not here."),
@@ -2952,7 +2959,7 @@ def main():
     p.add_argument("stage", choices=list(STAGES))
     p.add_argument("key", nargs="*")
     p.add_argument("--all", action="store_true", help="list all pending calls (review only; never batch them)")
-    p = sub.add_parser("record", help="record counts: KEY=TOTAL:b1,b2,...,b29 (29 hourly buckets, oldest first)")
+    p = sub.add_parser("record", help="record counts: KEY=TOTAL:b1,b2,...,b36 (36 hourly buckets, oldest first)")
     p.add_argument("pairs", nargs="*")
     p.add_argument("--reads-left-today", type=int)
     p.add_argument("--extra-reads", type=int, default=0, help="(legacy) non-429 error reads; prefer record-error")
