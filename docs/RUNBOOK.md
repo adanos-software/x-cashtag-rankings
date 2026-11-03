@@ -1,7 +1,7 @@
 # Runbook: refresh adanos-software/x-cashtag-rankings (one run, method v4)
 
 Owner: Alexander Schneider (Adanos Software GmbH). The repo is public; publish straight to `main` (the owner approved this).
-Schedule: **twice daily (~08:00 and ~20:00 Europe/Berlin)**, each run ranks the **trailing 12 hours** (since 2026-11-02; before: every 5 hours, 5h window). Data timestamps stay UTC.
+Schedule: rankings cover the **trailing 24 hours, refreshed once daily (~20:00 Berlin)** (since 2026-11-03 evening; 2026-11-02 to 11-03 morning: twice daily, 12h window; before: every 5 hours, 5h window). Never do extra or catch-up runs. Data timestamps stay UTC.
 A run is about **90 planned X reads, plus at most 10 retry reads (max 100)**. The script plans everything. You make **one X call at
 a time**, exactly as the script prints it, record the result, and publish at the end.
 **Expected duration: about 45–55 minutes.** That is ~90 sequential calls at ~15–20 s each, including the pauses, plus a few minutes to
@@ -25,7 +25,7 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   `python3 scripts/build_rankings.py purge-not-measurable` (no X reads) and commit the result. (2026-10-17: SOFI, excluded in the
   morning, was re-read as a hot ticker from its earlier stored count and listed in today.json with 4,433.)
 - **Word-collision guard (automatic, nothing to do in the loop):** the build holds back tickers whose bare count is > 8x their
-  median `$cashtag` 5h count before 2026-10-17 (the 12h count is scaled to 5h first: × 5/12; bare >= 50), or > 300 with no cashtag history (`held_back`, label
+  median `$cashtag` 5h count before 2026-10-17 (the 24h count is scaled to 5h first: × 5/24; bare >= 50), or > 300 with no cashtag history (`held_back`, label
   `suspected-word-collision`), and queues them (`state.json` -> `collision_queue`) for own samples in the next run
   (`pick-samples` stage 2 puts them first, at most half of the own slots; `pick-candidates` counts them again as
   `collision-check`). >= 30% real mentions in >= 10 own sampled posts -> ranked (`collision-check-passed`). Report held-back
@@ -36,7 +36,7 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   stage 1 is skipped in stage 2; queued suspected collisions get only the own sample). Two samples of one ticker = report it.
 - **Probe + automatic switch back (every bare run):** the first call of a bare run is `PROBE`, the query `$NVDA -is:retweet`.
   - Look at the tool output. If it contains **`$ was removed from query`**, record it with `--dollar-removed yes`
-    (`record PROBE=<TOTAL>:<36 buckets> --dollar-removed yes --reads-left-today B`) and continue normally.
+    (`record PROBE=<TOTAL>:<48 buckets> --dollar-removed yes --reads-left-today B`) and continue normally.
   - If the note is **missing** (the `$` works again), record it with **`--dollar-removed no`**. The script then switches
     `data/query_mode.json` back to `cashtag` and prints `MODE SWITCH: bare -> cashtag`. Do exactly what it says:
     `abandon --reason 'query mode switched to cashtag'`, then `plan` again right away and run the new (cashtag) plan.
@@ -87,7 +87,7 @@ yourself; copy what `next-call` prints. If something looks wrong, stop and repor
   - The script keeps the 10-read retry reserve free under the cap, and shrinks the run if needed: daily counts first (to 10),
     then splits (to 9), ETF groups, samples, spare, then the rest; megacaps last.
   - It prints `SKIP RUN` if fewer than ~20 planned reads fit.
-  - 2 runs × ≤100 = ≤200 reads per day (other bots share the cap).
+  - 1 run × ≤100 = ≤100 reads per day for this routine (other bots share the cap).
 - **Fail closed on split state:** if `plan` (or `check`) says `split state inconsistent ... fail-closed`, do NOT edit
   `data/splits.json` by hand. Run `python3 scripts/build_rankings.py splits-reset` (no X reads; it only drops the refinement
   carried over from earlier runs), then `plan` again, and mention it in the report. If `next-call` itself reports an
@@ -135,7 +135,7 @@ If `data/universe_meta.json` `fetched_at` is more than 7 days old, run `python3 
 ```bash
 python3 scripts/build_rankings.py plan
 ```
-It prints the window (e.g. `2026-11-01T19:00:00Z -> 2026-11-02T07:00:00Z`; counts cover the 36h ending at `window_end`), the
+It prints the window (e.g. `2026-11-02T19:00:00Z -> 2026-11-03T19:00:00Z`; counts cover the 48h ending at `window_end`), the
 split, normally (bare mode) `probe 1, stock_groups 14, megacaps 19, etf_groups 3, splits 18, samples 10, spare 3, dailies 22`
 = 90 planned, plus the 10 retry reserve (max 100), and how many split nodes were carried over (plus any pruning notes).
 Since 2026-10-17 17:00 Berlin group queries are packed to **≤ 3,000 characters** (the 503s hit ~4,090-char queries), so there
@@ -163,19 +163,19 @@ For an X call:
      Split parts (keys like `S07.1`, `S07.2.3`) are groups too: `next-call` prints the full query. Never derive a part's
      ticker list yourself. If you need the text again, re-run `next-call` (it prints the same pending call).
    - Formats:
-     - groups: `{"query": "($A OR $AA OR ...) -is:retweet -vote ... -\"pump.fun\"", "granularity": "hour", "start_time": "<window_end-36h>", "end_time": "<window_end>"}`
+     - groups: `{"query": "($A OR $AA OR ...) -is:retweet -vote ... -\"pump.fun\"", "granularity": "hour", "start_time": "<window_end-48h>", "end_time": "<window_end>"}`
      - tickers: `{"query": "$NVDA -is:retweet -whatsapp -telegram ... -bnb", ...same...}`: EVERY ticker carries the full spam
        suffix (~450 characters). Copy the printed query verbatim; never shorten it to `$NVDA -is:retweet`.
      - collision tickers: the suffix plus per-ticker terms, e.g. `$TM -is:retweet -whatsapp ... -bnb -telemoney -"telegram money" -sats`
      - samples (`search_posts_all`): `{"query": ..., "sort_order": "relevancy", "max_results": 25, "start_time": <window_start>, "end_time": <window_end>, "post.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"}`
 2. **Record the result** (this pauses 4 s):
-   - **Count:** `data` has 36 hourly buckets (oldest first) and `meta.total_tweet_count`:
+   - **Count:** `data` has 48 hourly buckets (oldest first) and `meta.total_tweet_count`:
      ```bash
      python3 scripts/build_rankings.py record S01=8571:364,344,...,316 --reads-left-today <B>
      python3 scripts/build_rankings.py record S07.2=1210:40,38,...,77 --reads-left-today <B>     # a split part
      ```
      After the 3rd part of a split the script computes the 4th by subtraction (no read); don't call X for it.
-     The script rejects a list that is not 36 long or doesn't add up to TOTAL. Fix the transcription; don't call X again.
+     The script rejects a list that is not 48 long or doesn't add up to TOTAL. Fix the transcription; don't call X again.
    - **Sample:** one line per post, `username | text`. Take the username from `includes.users` by `author_id`. Keep the **full
      text** on one line (replace line breaks with spaces); do not shorten it: the ticker-dump rule counts the real words around
      the cashtags, and the template rule compares texts across authors. Every post of the result goes in, spam included.
@@ -275,7 +275,7 @@ git push origin main
   (counts of tickers measured individually in the last 30h are subtracted first); nodes with ≤ 3 tickers are leaves whose members
   get exact counts. The tree persists in `data/splits.json`, is validated on every plan/build (fail closed), pruned after 30h
   without a count, and cold splits collapse.
-- Daily exact counts: every ticker gets at most one 36h count per UTC day, re-read only if its last 5h count was ≥ 60 (max 8 per
+- Daily exact counts: every ticker gets at most one 48h count per UTC day, re-read only if its last 5h count was ≥ 60 (max 8 per
   run; more only to fill unused slots). Megacaps are counted every run. ≥ 10 per run go to core tickers not yet counted today.
 - Spam: `config/spam_filter.txt` goes on every query (groups, split parts, every individual count, samples). Sampled posts from
   `config/spam_accounts.txt`, templates, ticker dumps (> 8 cashtags, or >= 4 with < 8 real words), filter-term posts, crypto/memecoin
@@ -283,6 +283,6 @@ git push origin main
   check (>= 3 clean authors, >= 30% clean, from this run's samples, today's pooled samples, or a check <= 24h old); failures go to
   `held_back` (and `held_back: true` in today.json).
   Maintain the config lists only between runs, never mid-run; run `check` after editing.
-- Ranking: exact 12h filtered count of the tickers counted in this run. Collision tickers additionally use their per-ticker terms.
+- Ranking: exact 24h filtered count of the tickers counted in this run. Collision tickers additionally use their per-ticker terms.
   Ranked by `rank_score` (clean-adjusted: `rank_score_raw` × `clean_share_est`); bursts that collapsed are capped in `rank_score_raw`. `risers` is a separate list. `data/today.json` is the daily view.
 - Change config only between runs. Run `check` and `python3 -m unittest discover tests` before committing such a change.
